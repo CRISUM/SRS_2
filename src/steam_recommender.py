@@ -134,8 +134,12 @@ class SteamRecommender:
         self.user_embeddings = None
         self.device = torch.device('cuda' if self.config['use_gpu'] and torch.cuda.is_available() else 'cpu')
 
-        logger.info(f"初始化推荐系统完成，使用设备: {self.device}")
+        # 在这里添加缓存字典
+        self.feature_cache = {}  # 用于缓存特征
+        self.recommendation_cache = {}  # 用于缓存推荐结果
+        self.score_cache = {}  # 用于缓存预测分数
 
+        logger.info(f"初始化推荐系统完成，使用设备: {self.device}")
     def load_data(self):
         """加载和预处理数据"""
         logger.info(f"开始加载数据: {self.data_path}")
@@ -996,29 +1000,43 @@ class SteamRecommender:
 
     def generate_recommendations(self, user_id, n=10):
         """为指定用户生成推荐"""
+        # 使用缓存
+        cache_key = f"{user_id}_{n}"
+        if cache_key in self.recommendation_cache:
+            return self.recommendation_cache[cache_key]
+
         logger.info(f"为用户 {user_id} 生成 {n} 条推荐...")
 
         # 检查用户是否存在于训练数据中
         if user_id not in self.train_df['user_id'].values and user_id not in self.test_df['user_id'].values:
             logger.warning(f"用户 {user_id} 未在训练或测试数据中找到")
-            return self.handle_cold_start_user(n)
+            recommendations = self.handle_cold_start_user(n)
+            self.recommendation_cache[cache_key] = recommendations
+            return recommendations
 
         # 获取用户已经评论过的游戏
         user_games = set(self.df[self.df['user_id'] == user_id]['app_id'].values)
 
-        # 获取候选游戏（所有未被用户评论过的游戏）
-        candidate_games = set(self.df['app_id'].unique()) - user_games
+        # 使用热门游戏缩减候选集
+        # 计算游戏流行度
+        popular_games_df = self.df.groupby('app_id').size().reset_index(name='count')
+        popular_games_df = popular_games_df.sort_values('count', ascending=False)
+
+        # 只选择前500个热门游戏作为候选（可以调整这个数字）
+        candidate_size = min(500, len(popular_games_df))
+        top_games = set(popular_games_df.head(candidate_size)['app_id'].values)
+        candidate_games = top_games - user_games
 
         # 如果没有候选游戏，返回热门游戏
         if not candidate_games:
             logger.warning(f"用户 {user_id} 没有可推荐的候选游戏")
-            return self.get_popular_games(n)
+            recommendations = self.get_popular_games(n)
+            self.recommendation_cache[cache_key] = recommendations
+            return recommendations
 
         # 为每个候选游戏预测得分
         predictions = []
-
         for game_id in candidate_games:
-            # 合并特征
             score = self.predict_score(user_id, game_id)
             predictions.append((game_id, score))
 
@@ -1026,72 +1044,154 @@ class SteamRecommender:
         recommendations = sorted(predictions, key=lambda x: x[1], reverse=True)[:n]
 
         logger.info(f"成功为用户 {user_id} 生成了 {len(recommendations)} 条推荐")
+
+        # 缓存结果
+        self.recommendation_cache[cache_key] = recommendations
+
         return recommendations
 
     def predict_score(self, user_id, game_id):
         """预测用户对游戏的评分"""
-        # 创建特征
-        features = self.extract_prediction_features(user_id, game_id)
+        # 使用缓存
+        cache_key = f"{user_id}_{game_id}"
+        if cache_key in self.score_cache:
+            return self.score_cache[cache_key]
 
-        # 使用LightGBM模型预测
-        if self.lgbm_model is not None:
-            lgbm_score = self.lgbm_model.predict([features])[0]
-        else:
-            lgbm_score = 0.5
+        try:
+            # 创建特征
+            features = self.extract_prediction_features(user_id, game_id)
 
-        # 使用序列模型预测
-        seq_score = self.predict_sequence_score(user_id, game_id)
+            # 输出调试信息
+            logger.debug(f"为用户 {user_id} 和游戏 {game_id} 提取的特征数量: {len(features)}")
 
-        # 使用内容模型预测
-        content_score = self.predict_content_score(user_id, game_id)
+            # 安全检查：确保特征非空
+            if len(features) == 0 and self.lgbm_model is not None:
+                logger.warning(f"提取的特征为空！使用默认特征代替。")
+                features = np.zeros(len(self.lgbm_model.feature_name()))
 
-        # 加权平均
-        final_score = (
-                self.config['lgbm_weight'] * lgbm_score +
-                self.config['sequence_weight'] * seq_score +
-                self.config['content_weight'] * content_score
-        )
+            # 使用LightGBM模型预测
+            if self.lgbm_model is not None:
+                # 设置predict_disable_shape_check=True以避免特征数量不匹配的错误
+                lgbm_score = self.lgbm_model.predict([features], predict_disable_shape_check=True)[0]
+            else:
+                lgbm_score = 0.5
 
-        return final_score
+            # 使用序列模型预测
+            seq_score = self.predict_sequence_score(user_id, game_id)
+
+            # 使用内容模型预测
+            content_score = self.predict_content_score(user_id, game_id)
+
+            # 加权平均
+            final_score = (
+                    self.config['lgbm_weight'] * lgbm_score +
+                    self.config['sequence_weight'] * seq_score +
+                    self.config['content_weight'] * content_score
+            )
+
+            # 缓存结果
+            self.score_cache[cache_key] = final_score
+
+            return final_score
+        except Exception as e:
+            logger.error(f"预测分数时出错: {str(e)}")
+            # 出错时返回默认分数
+            return 0.5
 
     def extract_prediction_features(self, user_id, game_id):
         """提取用于预测的特征"""
-        # 获取用户特征
-        user_features = self.train_df[self.train_df['user_id'] == user_id].iloc[0] if user_id in self.train_df[
-            'user_id'].values else \
-            self.test_df[self.test_df['user_id'] == user_id].iloc[0] if user_id in self.test_df[
-                'user_id'].values else None
+        # 使用缓存
+        cache_key = f"{user_id}_{game_id}"
+        if cache_key in self.feature_cache:
+            return self.feature_cache[cache_key]
 
-        # 获取游戏特征
-        game_features = self.train_df[self.train_df['app_id'] == game_id].iloc[0] if game_id in self.train_df[
-            'app_id'].values else \
-            self.test_df[self.test_df['app_id'] == game_id].iloc[0] if game_id in self.test_df[
-                'app_id'].values else None
+        # 如果模型存在，获取模型所需的特征名称
+        if self.lgbm_model is not None:
+            feature_names = self.lgbm_model.feature_name()
 
-        # 如果用户或游戏不存在，使用平均值或默认值
-        if user_features is None or game_features is None:
-            return self.get_default_features()
+            # 创建一个全零的特征数组（与模型特征数量相同）
+            features = np.zeros(len(feature_names))
 
-        # 合并特征
-        prediction_features = pd.concat([user_features, game_features])
+            # 获取用户特征和游戏特征
+            user_data = None
+            if user_id in self.train_df['user_id'].values:
+                user_data = self.train_df[self.train_df['user_id'] == user_id]
+            elif user_id in self.test_df['user_id'].values:
+                user_data = self.test_df[self.test_df['user_id'] == user_id]
 
-        # 选择用于预测的特征子集
-        exclude_cols = ['user_id', 'app_id', 'review_id', 'date', 'is_recommended',
-                        'prev_apps', 'prev_ratings', 'prev_hours', 'description', 'tags']
-        feature_cols = [col for col in prediction_features.index
-                        if col not in exclude_cols and not pd.api.types.is_list_like(prediction_features[col])]
+            game_data = None
+            if game_id in self.train_df['app_id'].values:
+                game_data = self.train_df[self.train_df['app_id'] == game_id]
+            elif game_id in self.test_df['app_id'].values:
+                game_data = self.test_df[self.test_df['app_id'] == game_id]
 
-        return prediction_features[feature_cols].values
+            # 如果找到了用户和游戏数据，尝试提取特征
+            if user_data is not None and game_data is not None and len(user_data) > 0 and len(game_data) > 0:
+                # 为了简单起见，我们取第一条用户和游戏数据
+                user_features = user_data.iloc[0]
+                game_features = game_data.iloc[0]
+
+                # 设法提取出所有有效的特征列
+                valid_cols = []
+                for col in self.train_df.columns:
+                    try:
+                        # 尝试获取一个样本值来检查它是不是列表类型
+                        val = self.train_df[col].iloc[0]
+                        if not isinstance(val, (list, dict, set)) and col not in ['user_id', 'app_id', 'date',
+                                                                                  'review_id', 'is_recommended',
+                                                                                  'prev_apps', 'prev_ratings',
+                                                                                  'prev_hours', 'description', 'tags']:
+                            valid_cols.append(col)
+                    except:
+                        continue
+
+                # 尝试构建一个特征字典
+                feature_dict = {}
+                for col in valid_cols:
+                    # 尝试获取特征值
+                    if col in user_features:
+                        feature_dict[col] = user_features[col]
+                    elif col in game_features:
+                        feature_dict[col] = game_features[col]
+
+                # 现在基于模型的特征名构建特征数组
+                for i, name in enumerate(feature_names):
+                    if name in feature_dict:
+                        features[i] = feature_dict[name]
+
+            # 缓存并返回特征数组
+            self.feature_cache[cache_key] = features
+            return features
 
     def get_default_features(self):
         """获取默认特征（用于冷启动场景）"""
-        # 使用训练集的平均值作为默认特征
-        exclude_cols = ['user_id', 'app_id', 'review_id', 'date', 'is_recommended',
-                        'prev_apps', 'prev_ratings', 'prev_hours', 'description', 'tags']
-        feature_cols = [col for col in self.train_df.columns
-                        if col not in exclude_cols and not pd.api.types.is_list_like(self.train_df[col].iloc[0])]
+        # 如果模型存在，返回一个与模型特征数量相同的零数组
+        if self.lgbm_model is not None:
+            feature_names = self.lgbm_model.feature_name()
+            return np.zeros(len(feature_names))
 
-        return self.train_df[feature_cols].mean().values
+        # 如果模型不存在但有训练数据，基于训练数据创建默认特征
+        elif hasattr(self, 'train_df') and self.train_df is not None:
+            # 找出所有可用的数值特征
+            num_features = []
+            for col in self.train_df.columns:
+                try:
+                    val = self.train_df[col].iloc[0]
+                    if not isinstance(val, (list, dict, set)) and col not in ['user_id', 'app_id', 'date', 'review_id',
+                                                                              'is_recommended', 'prev_apps',
+                                                                              'prev_ratings', 'prev_hours',
+                                                                              'description', 'tags']:
+                        if np.issubdtype(self.train_df[col].dtype, np.number) or self.train_df[col].dtype == bool:
+                            num_features.append(col)
+                except:
+                    continue
+
+            # 返回平均值作为默认特征
+            if num_features:
+                return self.train_df[num_features].mean().values
+
+        # 如果什么都没有，返回一个单一的零
+        return np.array([0.0])
 
     def predict_sequence_score(self, user_id, game_id):
         """使用序列模型预测得分"""

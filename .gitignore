@@ -4,3 +4,4 @@
 /.idea
 /.idea/inspectionProfiles
 /src/__pycache__
+/src/steam_recommender_model
