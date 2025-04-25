@@ -140,85 +140,157 @@ class SteamRecommender:
         self.score_cache = {}  # 用于缓存预测分数
 
         logger.info(f"初始化推荐系统完成，使用设备: {self.device}")
+
     def load_data(self):
-        """加载和预处理数据"""
-        logger.info(f"开始加载数据: {self.data_path}")
+        """使用分块加载数据"""
+        logger.info(f"开始分块加载数据: {self.data_path}")
 
-        # 读取CSV文件
-        self.df = pd.read_csv(self.data_path)
+        # 首先读取头部来获取列名
+        try:
+            header_df = pd.read_csv(self.data_path, nrows=1)
+            column_names = header_df.columns.tolist()
+            logger.info(f"数据列名: {column_names}")
 
-        # 数据类型转换和清洗
-        # 将字符串布尔值转换为实际布尔值
-        bool_columns = ['is_recommended', 'win', 'mac', 'linux', 'steam_deck']
-        for col in bool_columns:
-            if col in self.df.columns:
-                self.df[col] = self.df[col].map({'True': True, 'False': False, True: True, False: False})
+            # 检查所需的列是否存在
+            required_cols = ['user_id', 'app_id', 'is_recommended', 'hours', 'title', 'tags']
+            missing_cols = [col for col in required_cols if col not in column_names]
+            if missing_cols:
+                logger.error(f"CSV文件缺少必要的列: {missing_cols}")
 
-        # 转换日期列
-        date_columns = ['date', 'date_release']
-        for col in date_columns:
-            if col in self.df.columns:
-                self.df[col] = pd.to_datetime(self.df[col])
+                # 查看可能的替代列名（处理大小写不敏感的情况）
+                column_lower = [col.lower() for col in column_names]
+                for missing in missing_cols:
+                    possible_matches = [column_names[i] for i, col in enumerate(column_lower) if col == missing.lower()]
+                    if possible_matches:
+                        logger.info(f"'{missing}'可能的匹配列: {possible_matches}")
 
-        # 显示数据概况
-        logger.info(f"数据加载完成，形状: {self.df.shape}")
-        logger.info(f"列名: {self.df.columns.tolist()}")
-        logger.info(f"唯一用户数: {self.df['user_id'].nunique()}")
-        logger.info(f"唯一游戏数: {self.df['app_id'].nunique()}")
+                return False
+        except Exception as e:
+            logger.error(f"读取CSV文件头部时出错: {str(e)}")
+            return False
 
-        # 基本数据整理
-        # 填充缺失值
-        self.df['hours'] = self.df['hours'].fillna(0)
-        self.df['is_recommended'] = self.df['is_recommended'].fillna(False)
+        # 估算数据大小
+        chunk_size = 500000  # 每块约250-300MB
 
-        # 确保有数值型评分列
-        if 'rating_new' in self.df.columns:
-            self.df['rating'] = self.df['rating_new']
-        else:
-            # 如果没有rating_new列，尝试从is_recommended创建一个简单的评分
-            self.df['rating'] = self.df['is_recommended'].astype(int) * 10
+        # 初始化统计变量
+        unique_users = set()
+        unique_games = set()
 
-        # 添加基础时间特征
-        if 'date' in self.df.columns:
-            self.df['day_of_week'] = self.df['date'].dt.dayofweek
-            self.df['month'] = self.df['date'].dt.month
-            self.df['year'] = self.df['date'].dt.year
-            self.df['days_since_release'] = (self.df['date'] - self.df['date_release']).dt.days
+        # 创建用户和游戏的基本统计信息字典
+        user_stats = {}
+        game_stats = {}
 
-            # 处理负值（评论早于发布日期的情况）
-            self.df['days_since_release'] = self.df['days_since_release'].clip(lower=0)
+        # 分块处理
+        chunk_count = 0
 
-        # 划分训练集和测试集，基于时间序列
-        if 'date' in self.df.columns:
-            # 按时间排序
-            self.df = self.df.sort_values('date')
-            # 使用最近20%的数据作为测试集
-            split_idx = int(len(self.df) * 0.8)
-            self.train_df = self.df.iloc[:split_idx].copy()
-            self.test_df = self.df.iloc[split_idx:].copy()
-        else:
-            # 如果没有日期，则随机划分
-            self.train_df, self.test_df = train_test_split(
-                self.df, test_size=0.2, random_state=RANDOM_SEED,
-                stratify=self.df['is_recommended'] if 'is_recommended' in self.df.columns else None
-            )
+        try:
+            for chunk in pd.read_csv(self.data_path, chunksize=chunk_size):
+                chunk_count += 1
+                logger.info(f"处理数据块 {chunk_count}")
 
-        logger.info(f"训练集大小: {self.train_df.shape}, 测试集大小: {self.test_df.shape}")
-        return self.df
+                # 确保必要的列存在
+                for col in required_cols:
+                    if col not in chunk.columns:
+                        logger.warning(f"数据块 {chunk_count} 中缺少列 '{col}'，跳过此块")
+                        continue
+
+                # 更新基本统计信息
+                unique_users.update(chunk['user_id'].unique())
+                unique_games.update(chunk['app_id'].unique())
+
+                # 处理用户统计信息
+                for _, row in chunk.iterrows():
+                    user_id = row['user_id']
+                    app_id = row['app_id']
+
+                    # 处理可能的缺失值
+                    try:
+                        is_recommended = row['is_recommended']
+                        hours = float(row['hours']) if not pd.isna(row['hours']) else 0.0
+                    except (KeyError, ValueError):
+                        is_recommended = False
+                        hours = 0.0
+
+                    # 更新用户统计
+                    if user_id not in user_stats:
+                        user_stats[user_id] = {'game_count': 0, 'total_hours': 0, 'recommended_count': 0}
+                    user_stats[user_id]['game_count'] += 1
+                    user_stats[user_id]['total_hours'] += hours
+                    if is_recommended:
+                        user_stats[user_id]['recommended_count'] += 1
+
+                    # 更新游戏统计
+                    if app_id not in game_stats:
+                        title = row.get('title', f"Unknown Game {app_id}")
+                        tags = row.get('tags', "")
+
+                        game_stats[app_id] = {
+                            'user_count': 0,
+                            'total_hours': 0,
+                            'recommended_count': 0,
+                            'title': title,
+                            'tags': tags
+                        }
+                    game_stats[app_id]['user_count'] += 1
+                    game_stats[app_id]['total_hours'] += hours
+                    if is_recommended:
+                        game_stats[app_id]['recommended_count'] += 1
+
+                # 释放内存
+                del chunk
+                import gc
+                gc.collect()
+
+            logger.info(f"处理了 {chunk_count} 个数据块")
+
+            # 将统计信息转换为DataFrame
+            self.user_df = pd.DataFrame.from_dict(user_stats, orient='index')
+            self.user_df.reset_index(inplace=True)
+            self.user_df.rename(columns={'index': 'user_id'}, inplace=True)
+
+            self.game_df = pd.DataFrame.from_dict(game_stats, orient='index')
+            self.game_df.reset_index(inplace=True)
+            self.game_df.rename(columns={'index': 'app_id'}, inplace=True)
+
+            # 计算额外的统计信息
+            self.user_df['recommendation_ratio'] = self.user_df['recommended_count'] / self.user_df['game_count']
+            self.game_df['recommendation_ratio'] = self.game_df['recommended_count'] / self.game_df['user_count']
+            self.game_df['avg_hours'] = self.game_df['total_hours'] / self.game_df['user_count']
+
+            # 采样数据用于训练
+            self._create_training_sample()
+
+            logger.info(f"数据加载完成，发现 {len(unique_users)} 个独立用户和 {len(unique_games)} 个游戏")
+            return True
+
+        except Exception as e:
+            logger.error(f"处理数据时出错: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return False
 
     def engineer_features(self):
-        """特征工程函数，创建高级特征用于推荐系统"""
+        """优化的特征工程函数"""
         logger.info("开始特征工程...")
 
-        # 类别特征编码
-        cat_features = ['app_id', 'user_id', 'rating']
-        for feat in cat_features:
-            if feat in self.df.columns:
-                self.label_encoders[feat] = LabelEncoder()
-                self.df[f'{feat}_encoded'] = self.label_encoders[feat].fit_transform(self.df[feat])
-                self.train_df[f'{feat}_encoded'] = self.label_encoders[feat].transform(self.train_df[feat])
+        # 只在样本数据上进行特征工程
+        self._add_user_features()
+        self._add_game_features()
+        self._add_interaction_features()
+        self._simplified_sequence_features()
 
-                # 处理测试集中可能有的新值
+        # 填充可能的缺失值
+        self.train_df.fillna(0, inplace=True)
+        self.test_df.fillna(0, inplace=True)
+
+        # 使用 LabelEncoder 进行编码
+        cat_features = ['app_id', 'user_id']
+        for feat in cat_features:
+            if feat in self.train_df.columns:
+                self.label_encoders[feat] = LabelEncoder()
+                self.train_df[f'{feat}_encoded'] = self.label_encoders[feat].fit_transform(self.train_df[feat])
+
+                # 安全处理测试集中可能出现的新值
                 test_values = self.test_df[feat].values
                 known_values = set(self.label_encoders[feat].classes_)
                 new_values = [val for val in test_values if val not in known_values]
@@ -230,41 +302,151 @@ class SteamRecommender:
                 else:
                     self.test_df[f'{feat}_encoded'] = self.label_encoders[feat].transform(self.test_df[feat])
 
-        # ===== 用户特征 =====
-        user_features = self.create_user_features()
+        logger.info("特征工程完成")
+        return self.train_df, self.test_df
+
+    def _add_user_features(self):
+        """添加用户特征到训练集和测试集"""
+        logger.info("添加用户特征...")
+
+        # 创建用户特征子集
+        user_features = self.user_df[
+            ['user_id', 'game_count', 'total_hours', 'recommended_count', 'recommendation_ratio']]
+
+        # 添加到训练和测试集
         self.train_df = self.train_df.merge(user_features, on='user_id', how='left')
         self.test_df = self.test_df.merge(user_features, on='user_id', how='left')
 
-        # ===== 游戏特征 =====
-        game_features = self.create_game_features()
+        # 填充缺失值
+        for df in [self.train_df, self.test_df]:
+            if 'game_count' in df.columns:
+                df['game_count'].fillna(0, inplace=True)
+            if 'total_hours' in df.columns:
+                df['total_hours'].fillna(0, inplace=True)
+            if 'recommended_count' in df.columns:
+                df['recommended_count'].fillna(0, inplace=True)
+            if 'recommendation_ratio' in df.columns:
+                df['recommendation_ratio'].fillna(0, inplace=True)
+
+    def _add_game_features(self):
+        """添加游戏特征到训练集和测试集"""
+        logger.info("添加游戏特征...")
+
+        # 创建游戏特征子集
+        game_features = self.game_df[
+            ['app_id', 'user_count', 'total_hours', 'recommended_count', 'recommendation_ratio', 'avg_hours']]
+
+        # 添加到训练和测试集
         self.train_df = self.train_df.merge(game_features, on='app_id', how='left')
         self.test_df = self.test_df.merge(game_features, on='app_id', how='left')
 
-        # ===== 文本特征 =====
-        self.process_text_features()
+        # 添加价格相关特征（如果存在）
+        if 'price_final' in self.train_df.columns and 'price_original' in self.train_df.columns:
+            for df in [self.train_df, self.test_df]:
+                # 填充可能的缺失值
+                df['price_final'].fillna(0, inplace=True)
+                df['price_original'].fillna(0, inplace=True)
 
-        # ===== 交互特征 =====
-        self.create_interaction_features()
+                # 创建价格特征
+                df['discount_ratio'] = 1 - (df['price_final'] / df['price_original'].replace(0, 1))
+                df['value_ratio'] = df['price_final'] / (df['hours'] + 1)  # 防止除零
 
-        # ===== 序列特征 =====
-        self.create_sequence_features()
+    def _add_interaction_features(self):
+        """添加用户-游戏交互特征"""
+        logger.info("添加交互特征...")
 
-        # 缩放数值特征
-        num_features = [col for col in self.train_df.columns
-                        if self.train_df[col].dtype in [np.int64, np.float64]
-                        and col not in ['user_id', 'app_id', 'review_id', 'is_recommended']
-                        and not col.endswith('_encoded')]
-
-        self.scaler = StandardScaler()
-        self.train_df[num_features] = self.scaler.fit_transform(self.train_df[num_features].fillna(0))
-        self.test_df[num_features] = self.scaler.transform(self.test_df[num_features].fillna(0))
-
-        # 填充缺失值
         for df in [self.train_df, self.test_df]:
-            df.fillna(0, inplace=True)
+            # 非线性小时数特征
+            df['hours_log'] = np.log1p(df['hours'])
+            df['hours_sqrt'] = np.sqrt(df['hours'])
 
-        logger.info(f"特征工程完成，最终训练集特征数: {self.train_df.shape[1]}")
-        return self.train_df, self.test_df
+            # 用户-游戏交互特征
+            if 'total_hours' in df.columns and 'game_count' in df.columns:
+                df['hours_vs_avg'] = df['hours'] / (df['total_hours'] / df['game_count'] + 1e-5)
+
+            # 是否是用户游戏时间最长的游戏
+            if 'user_id' in df.columns and 'hours' in df.columns:
+                user_max_hours = df.groupby('user_id')['hours'].transform('max')
+                df['is_max_hours'] = (df['hours'] == user_max_hours).astype(int)
+
+            # 用户偏好与游戏特性匹配特征
+            if 'recommendation_ratio_x' in df.columns and 'recommendation_ratio_y' in df.columns:
+                df['pref_match'] = 1 - abs(df['recommendation_ratio_x'] - df['recommendation_ratio_y'])
+            elif 'recommendation_ratio' in df.columns:
+                # 处理列名可能不同的情况
+                user_ratio_col = None
+                game_ratio_col = None
+
+                # 查找可能的列名
+                for col in df.columns:
+                    if col.startswith('recommendation_ratio'):
+                        if user_ratio_col is None:
+                            user_ratio_col = col
+                        else:
+                            game_ratio_col = col
+                            break
+
+                if user_ratio_col and game_ratio_col:
+                    df['pref_match'] = 1 - abs(df[user_ratio_col] - df[game_ratio_col])
+
+    def _simplified_sequence_features(self):
+        """简化的序列特征创建"""
+        logger.info("创建简化的序列特征...")
+
+        # 限制序列长度
+        max_length = 10  # 降低序列长度
+
+        # 初始化特征列
+        for df in [self.train_df, self.test_df]:
+            df['prev_game_count'] = 0
+            df['avg_prev_rating'] = 0
+            df['last_game_hours'] = 0
+
+            # 确保date列是日期类型
+            if 'date' in df.columns:
+                df['date'] = pd.to_datetime(df['date'])
+
+        # 分批处理，按用户和日期排序处理
+        for user_id in self.train_df['user_id'].unique():
+            # 获取该用户的训练数据
+            user_train = self.train_df[self.train_df['user_id'] == user_id].sort_values('date')
+
+            # 创建简单序列特征
+            for i, idx in enumerate(user_train.index):
+                if i > 0:
+                    # 前几个游戏的数量
+                    self.train_df.at[idx, 'prev_game_count'] = min(i, max_length)
+
+                    # 前几个游戏的平均评分
+                    prev_ratings = user_train.iloc[:i]['is_recommended'].astype(int).values[-max_length:]
+                    if len(prev_ratings) > 0:
+                        self.train_df.at[idx, 'avg_prev_rating'] = np.mean(prev_ratings)
+
+                    # 上一个游戏的时长
+                    self.train_df.at[idx, 'last_game_hours'] = user_train.iloc[i - 1]['hours']
+
+        # 对测试集执行相同的操作
+        for user_id in self.test_df['user_id'].unique():
+            user_data = pd.concat([
+                self.train_df[self.train_df['user_id'] == user_id],
+                self.test_df[self.test_df['user_id'] == user_id]
+            ]).sort_values('date')
+
+            # 找到测试集中该用户的行索引
+            test_indices = self.test_df[self.test_df['user_id'] == user_id].index
+
+            for idx in test_indices:
+                # 找到当前记录在完整历史中的位置
+                current_date = self.test_df.at[idx, 'date']
+                history = user_data[user_data['date'] < current_date]
+
+                # 创建特征
+                self.test_df.at[idx, 'prev_game_count'] = min(len(history), max_length)
+
+                if len(history) > 0:
+                    self.test_df.at[idx, 'avg_prev_rating'] = history['is_recommended'].astype(int).tail(
+                        max_length).mean()
+                    self.test_df.at[idx, 'last_game_hours'] = history.iloc[-1]['hours'] if len(history) > 0 else 0
 
     def create_user_features(self):
         """创建用户级特征"""
@@ -717,13 +899,13 @@ class SteamRecommender:
             'objective': 'binary',
             'metric': 'auc',
             'boosting_type': 'gbdt',
-            'learning_rate': 0.05,
+            'learning_rate': 0.1,
             'num_leaves': 31,
-            'max_depth': -1,
-            'min_child_samples': 20,
-            'subsample': 0.8,
-            'colsample_bytree': 0.8,
-            'random_state': 42
+            'max_depth': 6,  # 降低复杂度
+            'min_child_samples': 50,
+            'subsample': 0.6,  # 减少样本比例
+            'colsample_bytree': 0.6,  # 减少特征比例
+            'n_estimators': 200  # 减少迭代次数
         }
 
         # 训练模型
@@ -757,132 +939,99 @@ class SteamRecommender:
         return self.lgbm_model
 
     def train_sequence_model(self):
-        """训练序列模型"""
+        """训练简化的序列模型"""
         logger.info("开始训练序列模型...")
 
-        # 检查是否有足够的序列数据
-        if not self.train_df['prev_apps'].apply(lambda x: isinstance(x, list) and len(x) > 0).any():
-            logger.warning("没有足够的序列数据，跳过序列模型训练")
+        # 检查必要的序列特征是否存在
+        if 'prev_game_count' not in self.train_df.columns:
+            logger.warning("没有找到序列特征，跳过序列模型训练")
             return None
 
-        # 准备序列数据
-        train_data = self.prepare_sequence_data(self.train_df)
+        # 使用简化的序列特征代替完整的序列历史
+        # 用于更高效地处理大型数据集
 
         # 定义序列模型
-        class GameSequenceModel(nn.Module):
-            def __init__(self, num_games, embedding_dim, hidden_dim, num_layers, dropout):
+        class SimpleSequenceModel(nn.Module):
+            def __init__(self, input_dim, hidden_dim=64, dropout=0.2):
                 super().__init__()
-                self.game_embedding = nn.Embedding(num_games + 1, embedding_dim)  # +1 用于填充
-                self.lstm = nn.LSTM(
-                    embedding_dim,
-                    hidden_dim,
-                    num_layers,
-                    batch_first=True,
-                    dropout=dropout if num_layers > 1 else 0
-                )
-                self.dropout = nn.Dropout(dropout)
-                self.fc = nn.Linear(hidden_dim, 1)
-                self.sigmoid = nn.Sigmoid()
-
-            def forward(self, game_seq, seq_lengths):
-                # 嵌入游戏ID
-                embedded = self.game_embedding(game_seq)
-
-                # 打包序列以处理变长序列
-                packed = nn.utils.rnn.pack_padded_sequence(
-                    embedded, seq_lengths.cpu(), batch_first=True, enforce_sorted=False
+                self.layers = nn.Sequential(
+                    nn.Linear(input_dim, hidden_dim),
+                    nn.ReLU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(hidden_dim, hidden_dim // 2),
+                    nn.ReLU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(hidden_dim // 2, 1),
+                    nn.Sigmoid()
                 )
 
-                # LSTM处理
-                _, (hidden, _) = self.lstm(packed)
+            def forward(self, x):
+                return self.layers(x).squeeze()
 
-                # 获取最后一层隐藏状态
-                last_hidden = hidden[-1]
+        # 选择序列相关特征
+        seq_features = [
+            'prev_game_count',
+            'avg_prev_rating',
+            'last_game_hours'
+        ]
 
-                # 线性层和sigmoid激活函数
-                output = self.fc(self.dropout(last_hidden))
-                return self.sigmoid(output).squeeze()
+        # 添加其他可能有用的特征
+        additional_features = [
+            'hours',
+            'hours_log',
+            'recommendation_ratio',
+            'total_hours',
+            'game_count'
+        ]
 
-        # 获取游戏数量
-        num_games = max(self.label_encoders['app_id'].classes_.size,
-                        self.train_df['app_id_encoded'].max(),
-                        self.test_df['app_id_encoded'].max()) + 1
+        # 最终使用的特征列表
+        feature_cols = []
+        for col in seq_features + additional_features:
+            if col in self.train_df.columns:
+                feature_cols.append(col)
+
+        if len(feature_cols) == 0:
+            logger.warning("没有可用的特征用于序列模型训练")
+            return None
+
+        logger.info(f"使用特征: {feature_cols}")
+
+        # 准备训练数据
+        X_train = self.train_df[feature_cols].values
+        y_train = self.train_df['is_recommended'].astype(int).values
+
+        # 转换为PyTorch张量
+        X_train_tensor = torch.FloatTensor(X_train)
+        y_train_tensor = torch.FloatTensor(y_train)
 
         # 创建数据集和数据加载器
-        class GameSequenceDataset(Dataset):
-            def __init__(self, sequences, targets):
-                self.sequences = sequences
-                self.targets = targets
-
-            def __len__(self):
-                return len(self.sequences)
-
-            def __getitem__(self, idx):
-                return self.sequences[idx], self.targets[idx]
-
-        # 创建训练数据集
-        train_dataset = GameSequenceDataset(
-            train_data['sequences'],
-            train_data['targets']
-        )
-
-        # 数据整理函数
-        def collate_fn(batch):
-            # 提取序列和目标
-            sequences, targets = zip(*batch)
-
-            # 计算每个序列的长度
-            seq_lengths = torch.tensor([len(seq) for seq in sequences])
-
-            # 填充序列到相同长度
-            max_len = max(seq_lengths).item()
-            padded_sequences = torch.zeros(len(sequences), max_len, dtype=torch.long)
-
-            for i, seq in enumerate(sequences):
-                end = seq_lengths[i]
-                padded_sequences[i, :end] = torch.tensor(seq[:end])
-
-            # 转换目标为张量
-            targets = torch.tensor(targets, dtype=torch.float32)
-
-            return padded_sequences, seq_lengths, targets
-
-        # 创建数据加载器
-        train_loader = DataLoader(
+        train_dataset = torch.utils.data.TensorDataset(X_train_tensor, y_train_tensor)
+        train_loader = torch.utils.data.DataLoader(
             train_dataset,
-            batch_size=self.config['sequence_params']['batch_size'],
-            shuffle=True,
-            collate_fn=collate_fn
+            batch_size=64,
+            shuffle=True
         )
 
         # 初始化模型
-        model = GameSequenceModel(
-            num_games=num_games,
-            embedding_dim=self.config['sequence_params']['embedding_dim'],
-            hidden_dim=self.config['sequence_params']['hidden_dim'],
-            num_layers=self.config['sequence_params']['num_layers'],
-            dropout=self.config['sequence_params']['dropout']
-        ).to(self.device)
+        input_dim = len(feature_cols)
+        self.sequence_model = SimpleSequenceModel(input_dim).to(self.device)
 
         # 定义损失函数和优化器
         criterion = nn.BCELoss()
-        optimizer = optim.Adam(model.parameters(), lr=self.config['sequence_params']['learning_rate'])
+        optimizer = optim.Adam(self.sequence_model.parameters(), lr=0.001)
 
         # 训练模型
-        epochs = self.config['sequence_params']['epochs']
+        epochs = 5
         for epoch in range(epochs):
-            model.train()
+            self.sequence_model.train()
             total_loss = 0
 
-            for sequences, seq_lengths, targets in train_loader:
-                # 移动数据到设备
-                sequences = sequences.to(self.device)
-                seq_lengths = seq_lengths.to(self.device)
-                targets = targets.to(self.device)
+            for inputs, targets in train_loader:
+                inputs, targets = inputs.to(self.device), targets.to(self.device)
 
                 # 前向传播
                 optimizer.zero_grad()
-                outputs = model(sequences, seq_lengths)
+                outputs = self.sequence_model(inputs)
 
                 # 计算损失
                 loss = criterion(outputs, targets)
@@ -896,9 +1045,8 @@ class SteamRecommender:
             avg_loss = total_loss / len(train_loader)
             logger.info(f"Epoch {epoch + 1}/{epochs}, Loss: {avg_loss:.4f}")
 
-        # 保存模型
-        self.sequence_model = model
-        self.sequence_model.eval()  # 设为评估模式
+        # 创建游戏嵌入空间
+        self.game_embeddings = {}
 
         logger.info("序列模型训练完成")
         return self.sequence_model
@@ -931,18 +1079,35 @@ class SteamRecommender:
         }
 
     def create_game_embeddings(self):
-        """从训练好的序列模型中提取游戏嵌入向量"""
-        if not hasattr(self, 'sequence_model') or self.sequence_model is None:
-            logger.warning("序列模型未训练，无法提取游戏嵌入向量")
-            return None
+        """创建游戏嵌入向量 - 简化版本"""
+        logger.info("创建游戏嵌入向量...")
 
-        # 提取游戏嵌入层
-        game_embeddings = self.sequence_model.game_embedding.weight.data.cpu().numpy()
+        # 在此实现中，我们不使用传统的嵌入层
+        # 而是基于游戏特征创建简单的嵌入表示
 
-        # 创建游戏ID到嵌入向量的映射
+        # 获取所有游戏ID
+        all_games = self.game_df['app_id'].unique()
+
+        # 用于嵌入的特征
+        embed_features = ['user_count', 'recommendation_ratio', 'avg_hours']
+        available_features = [f for f in embed_features if f in self.game_df.columns]
+
+        if not available_features:
+            logger.warning("没有可用的特征来创建游戏嵌入")
+            return {}
+
+        # 标准化特征
+        from sklearn.preprocessing import StandardScaler
+        scaler = StandardScaler()
+
+        # 特征矩阵
+        feature_matrix = self.game_df[available_features].values
+        normalized_features = scaler.fit_transform(feature_matrix)
+
+        # 创建嵌入字典
         self.game_embeddings = {}
-        for game_idx, game_id in enumerate(self.label_encoders['app_id'].classes_):
-            self.game_embeddings[game_id] = game_embeddings[game_idx]
+        for i, game_id in enumerate(self.game_df['app_id']):
+            self.game_embeddings[game_id] = normalized_features[i]
 
         logger.info(f"创建了 {len(self.game_embeddings)} 个游戏嵌入向量")
         return self.game_embeddings
@@ -999,7 +1164,7 @@ class SteamRecommender:
         return self.content_similarity
 
     def generate_recommendations(self, user_id, n=10):
-        """为指定用户生成推荐"""
+        """优化的推荐生成函数"""
         # 使用缓存
         cache_key = f"{user_id}_{n}"
         if cache_key in self.recommendation_cache:
@@ -1007,32 +1172,32 @@ class SteamRecommender:
 
         logger.info(f"为用户 {user_id} 生成 {n} 条推荐...")
 
-        # 检查用户是否存在于训练数据中
-        if user_id not in self.train_df['user_id'].values and user_id not in self.test_df['user_id'].values:
+        # 对于新用户或找不到的用户，使用热门推荐
+        if user_id not in self.user_df['user_id'].values:
             logger.warning(f"用户 {user_id} 未在训练或测试数据中找到")
-            recommendations = self.handle_cold_start_user(n)
-            self.recommendation_cache[cache_key] = recommendations
-            return recommendations
+            return self.get_popular_games(n)
 
         # 获取用户已经评论过的游戏
-        user_games = set(self.df[self.df['user_id'] == user_id]['app_id'].values)
+        user_games = set()
 
-        # 使用热门游戏缩减候选集
-        # 计算游戏流行度
-        popular_games_df = self.df.groupby('app_id').size().reset_index(name='count')
-        popular_games_df = popular_games_df.sort_values('count', ascending=False)
+        # 从训练集获取
+        user_train_games = self.train_df[self.train_df['user_id'] == user_id]['app_id'].values
+        user_games.update(user_train_games)
 
-        # 只选择前500个热门游戏作为候选（可以调整这个数字）
-        candidate_size = min(500, len(popular_games_df))
-        top_games = set(popular_games_df.head(candidate_size)['app_id'].values)
+        # 从测试集获取
+        user_test_games = self.test_df[self.test_df['user_id'] == user_id]['app_id'].values
+        user_games.update(user_test_games)
+
+        # 从热门游戏中筛选候选集
+        candidate_size = min(500, len(self.game_df))  # 只考虑最多500款游戏
+        top_games = set(self.game_df.sort_values('user_count', ascending=False)
+                        .head(candidate_size)['app_id'].values)
         candidate_games = top_games - user_games
 
         # 如果没有候选游戏，返回热门游戏
         if not candidate_games:
             logger.warning(f"用户 {user_id} 没有可推荐的候选游戏")
-            recommendations = self.get_popular_games(n)
-            self.recommendation_cache[cache_key] = recommendations
-            return recommendations
+            return self.get_popular_games(n)
 
         # 为每个候选游戏预测得分
         predictions = []
@@ -1198,36 +1363,61 @@ class SteamRecommender:
         if not hasattr(self, 'sequence_model') or self.sequence_model is None:
             return 0.5
 
-        # 获取用户历史序列
-        user_data = self.df[self.df['user_id'] == user_id].sort_values('date')
+        # 尝试获取用户和游戏的特征
+        user_features = None
+        if user_id in self.user_df['user_id'].values:
+            user_features = self.user_df[self.user_df['user_id'] == user_id].iloc[0]
 
-        if len(user_data) == 0:
+        game_features = None
+        if game_id in self.game_df['app_id'].values:
+            game_features = self.game_df[self.game_df['app_id'] == game_id].iloc[0]
+
+        if user_features is None or game_features is None:
             return 0.5
 
-        # 获取用户之前玩过的游戏ID
-        prev_games = user_data['app_id'].tolist()
+        # 创建必要的特征
+        features = {}
 
-        # 将游戏ID转换为编码
-        game_seq = []
-        for app_id in prev_games:
-            if app_id in self.label_encoders['app_id'].classes_:
-                encoded_id = self.label_encoders['app_id'].transform([app_id])[0]
-                game_seq.append(encoded_id)
-            else:
-                # 对于不在训练集中的游戏ID，使用特殊的OOV ID
-                game_seq.append(len(self.label_encoders['app_id'].classes_))
+        # 序列特征
+        features['prev_game_count'] = user_features.get('game_count', 0)
+        features['avg_prev_rating'] = user_features.get('recommendation_ratio', 0.5)
+        features['last_game_hours'] = 0  # 这个需要从历史中获取，这里简化为0
 
-        # 如果序列为空，返回默认得分
-        if not game_seq:
+        # 其他可能用到的特征
+        features['hours'] = 0  # 还没有游玩时间
+        features['hours_log'] = 0
+        features['recommendation_ratio'] = game_features.get('recommendation_ratio', 0.5)
+        features['total_hours'] = user_features.get('total_hours', 0)
+        features['game_count'] = user_features.get('game_count', 0)
+
+        # 创建特征向量
+        feature_values = []
+        seq_features = [
+            'prev_game_count',
+            'avg_prev_rating',
+            'last_game_hours',
+            'hours',
+            'hours_log',
+            'recommendation_ratio',
+            'total_hours',
+            'game_count'
+        ]
+
+        for feat in seq_features:
+            if hasattr(self.sequence_model, 'layers') and feat in features:
+                feature_values.append(features[feat])
+
+        # 如果没有特征，返回默认值
+        if not feature_values:
             return 0.5
 
-        # 准备模型输入
-        seq_tensor = torch.tensor([game_seq], dtype=torch.long).to(self.device)
-        seq_length = torch.tensor([len(game_seq)], dtype=torch.long).to(self.device)
+        # 转换为张量并预测
+        input_tensor = torch.FloatTensor([feature_values]).to(self.device)
 
         # 预测
+        self.sequence_model.eval()
         with torch.no_grad():
-            score = self.sequence_model(seq_tensor, seq_length).item()
+            score = self.sequence_model(input_tensor).item()
 
         return score
 
@@ -1272,21 +1462,23 @@ class SteamRecommender:
         return self.get_popular_games(n)
 
     def get_popular_games(self, n=10):
-        """获取热门游戏"""
-        # 基于评论数量和评分计算游戏受欢迎程度
-        game_popularity = self.df.groupby('app_id').agg({
-            'user_id': 'count',  # 评论数
-            'rating': 'mean'  # 平均评分
-        }).reset_index()
+        """获取热门游戏 - 优化版本"""
+        # 使用game_df而不是df
+        game_popularity = self.game_df.copy()
 
-        # 重命名列
-        game_popularity.columns = ['app_id', 'review_count', 'avg_rating']
-
-        # 计算综合流行度得分
-        game_popularity['popularity_score'] = (
-                game_popularity['review_count'] * 0.7 +
-                game_popularity['avg_rating'] * 0.3
-        )
+        # 添加流行度得分
+        if 'recommendation_ratio' in game_popularity.columns and 'user_count' in game_popularity.columns:
+            game_popularity['popularity_score'] = (
+                    game_popularity['user_count'] * 0.7 +
+                    game_popularity['recommendation_ratio'] * 0.3
+            )
+        else:
+            # 如果没有这些列，使用可用的列
+            if 'user_count' in game_popularity.columns:
+                game_popularity['popularity_score'] = game_popularity['user_count']
+            else:
+                # 没有可用的指标，使用随机分数
+                game_popularity['popularity_score'] = np.random.random(len(game_popularity))
 
         # 排序并获取前N个游戏
         popular_games = game_popularity.sort_values('popularity_score', ascending=False).head(n)
@@ -1297,7 +1489,7 @@ class SteamRecommender:
         )]
 
     def evaluate_recommendations(self, k_values=[5, 10, 20]):
-        """评估推荐系统性能"""
+        """评估推荐系统性能 - 优化版本"""
         logger.info("开始评估推荐系统...")
 
         # 准备测试用户
@@ -1320,7 +1512,7 @@ class SteamRecommender:
 
         # 所有推荐的游戏集合（用于计算覆盖率）
         all_recommended_games = set()
-        all_games = set(self.df['app_id'].unique())
+        all_games = set(self.game_df['app_id'].unique())  # 使用game_df而不是df
 
         # 评估每个测试用户
         for user_id in tqdm(test_users, desc="评估用户"):
@@ -1362,19 +1554,27 @@ class SteamRecommender:
                 ideal_relevance = sorted(relevance, reverse=True)
 
                 if sum(relevance) > 0:
-                    from sklearn.metrics import ndcg_score
-                    ndcg = ndcg_score([ideal_relevance], [relevance])
-                    metrics['ndcg'][k].append(ndcg)
+                    try:
+                        from sklearn.metrics import ndcg_score
+                        ndcg = ndcg_score([ideal_relevance], [relevance])
+                        metrics['ndcg'][k].append(ndcg)
+                    except:
+                        # 如果 ndcg_score 失败，使用自定义计算
+                        logger.warning("使用自定义NDCG计算")
+                        dcg = sum((2 ** rel - 1) / np.log2(i + 2) for i, rel in enumerate(relevance))
+                        idcg = sum((2 ** rel - 1) / np.log2(i + 2) for i, rel in enumerate(ideal_relevance))
+                        ndcg = dcg / idcg if idcg > 0 else 0
+                        metrics['ndcg'][k].append(ndcg)
 
                 # 计算多样性
                 # 使用游戏标签计算推荐列表中游戏的不同类型
-                if 'tags' in self.df.columns:
+                if 'tags' in self.game_df.columns:  # 使用game_df检查tags列
                     game_tags = {}
                     for game_id in top_k_games:
-                        tags = self.df[self.df['app_id'] == game_id]['tags'].iloc[0] if game_id in self.df[
-                            'app_id'].values else ""
-                        if pd.notna(tags):
-                            game_tags[game_id] = set(tag.strip() for tag in tags.split(','))
+                        game_row = self.game_df[self.game_df['app_id'] == game_id]
+                        if not game_row.empty and 'tags' in game_row.columns and not pd.isna(game_row['tags'].iloc[0]):
+                            tags = set(tag.strip() for tag in game_row['tags'].iloc[0].split(','))
+                            game_tags[game_id] = tags
                         else:
                             game_tags[game_id] = set()
 
@@ -1399,7 +1599,7 @@ class SteamRecommender:
         # 计算平均指标
         results = {}
         for metric in ['precision', 'recall', 'ndcg', 'diversity']:
-            results[metric] = {k: np.mean(metrics[metric][k]) for k in k_values}
+            results[metric] = {k: np.mean(metrics[metric][k]) if metrics[metric][k] else 0 for k in k_values}
         results['coverage'] = metrics['coverage']
 
         # 打印结果
@@ -1407,7 +1607,8 @@ class SteamRecommender:
         for metric in ['precision', 'recall', 'ndcg', 'diversity']:
             logger.info(f"{metric.capitalize()}:")
             for k in k_values:
-                logger.info(f"  @{k}: {results[metric][k]:.4f}")
+                value = results[metric][k]
+                logger.info(f"  @{k}: {value:.4f}")
         logger.info(f"Coverage: {results['coverage']:.4f}")
 
         return results
@@ -1596,8 +1797,69 @@ class SteamRecommender:
 
         return recommendations
 
+    def _create_training_sample(self):
+        """从大型数据集创建训练样本"""
+        logger.info("创建训练样本...")
 
-# 在steam_recommender.py文件中添加以下增量训练方法
+        try:
+            # 选择活跃用户和热门游戏
+            if len(self.user_df) > 10000:
+                active_users = self.user_df.sort_values('game_count', ascending=False).head(10000)['user_id'].values
+            else:
+                active_users = self.user_df['user_id'].values
+
+            if len(self.game_df) > 5000:
+                popular_games = self.game_df.sort_values('user_count', ascending=False).head(5000)['app_id'].values
+            else:
+                popular_games = self.game_df['app_id'].values
+
+            # 读取部分原始数据用于训练
+            sample_rows = []
+            sample_size = min(1000000, len(self.user_df) * 10)  # 限制样本大小
+
+            rows_collected = 0
+            chunk_size = 500000
+
+            for chunk in pd.read_csv(self.data_path, chunksize=chunk_size):
+                # 确保必要的列存在
+                if not all(col in chunk.columns for col in ['user_id', 'app_id', 'is_recommended']):
+                    continue
+
+                # 过滤出活跃用户和热门游戏的交互
+                filtered_chunk = chunk[
+                    (chunk['user_id'].isin(active_users)) &
+                    (chunk['app_id'].isin(popular_games))
+                    ]
+
+                if len(filtered_chunk) > 0:
+                    sample_rows.append(filtered_chunk)
+                    rows_collected += len(filtered_chunk)
+
+                if rows_collected >= sample_size:
+                    break
+
+            if not sample_rows:
+                logger.warning("没有收集到样本数据！")
+                return False
+
+            # 合并样本
+            self.sample_df = pd.concat(sample_rows)
+
+            # 分割训练和测试
+            from sklearn.model_selection import train_test_split
+            self.train_df, self.test_df = train_test_split(
+                self.sample_df, test_size=0.2, random_state=42
+            )
+
+            logger.info(
+                f"创建了 {len(self.sample_df)} 行的训练样本，训练集 {len(self.train_df)} 行，测试集 {len(self.test_df)} 行")
+            return True
+
+        except Exception as e:
+            logger.error(f"创建训练样本时出错: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return False
 
 def update_lgbm_model(self, new_data_df):
     """
@@ -1935,7 +2197,7 @@ def main():
     )
 
     # 初始化推荐系统
-    recommender = SteamRecommender('steam_data.csv')
+    recommender = SteamRecommender('steam_top_1000000.csv')
 
     # 加载数据
     recommender.load_data()

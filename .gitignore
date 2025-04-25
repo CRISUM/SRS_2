@@ -5,3 +5,6 @@
 /.idea/inspectionProfiles
 /src/__pycache__
 /src/steam_recommender_model
+/src/trained_model
+src/steam_recommender.log
+src/steam_recommender.log

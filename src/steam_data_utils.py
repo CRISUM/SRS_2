@@ -581,7 +581,7 @@ if __name__ == "__main__":
     )
 
     # 测试功能
-    data_file = "steam_data.csv"
+    data_file = "steam_top_1000000.csv"
     try:
         df = load_and_preprocess_data(data_file)
         print(f"数据加载成功，形状: {df.shape}")
