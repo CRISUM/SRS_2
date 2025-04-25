@@ -899,7 +899,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description='Steam游戏推荐系统示例')
-    parser.add_argument('--data', type=str, default='steam_top_1000000.csv', help='数据文件路径')
+    parser.add_argument('--data', type=str, default='steam_top_100000.csv', help='数据文件路径')
     parser.add_argument('--mode', type=str, default='train',
                         choices=['train', 'recommend', 'evaluate', 'analyze', 'optimize'],
                         help='运行模式')

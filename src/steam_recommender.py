@@ -864,19 +864,35 @@ class SteamRecommender:
             else:
                 # 跳过object和datetime类型
                 logger.info(f"跳过非数值型特征: {col} (类型: {self.train_df[col].dtype})")
+        # 排除高度泄露特征
+        leakage_features = [
+            'rating_new',
+            'recommended_count_x', 'recommended_count_y',
+            'recommendation_ratio_x', 'recommendation_ratio_y',
+            'is_recommended_value', 'is_recommended_sum', 'pref_match'
+        ]
 
-        X_train = self.train_df[feature_cols]
+        # 显示被排除的特征
+        excluded_features = [f for f in leakage_features if f in feature_cols]
+        if excluded_features:
+            logger.info(f"排除以下泄露特征: {excluded_features}")
+
+        # 过滤特征列表
+        safe_feature_cols = [col for col in feature_cols if col not in leakage_features]
+        logger.info(f"使用安全特征: {safe_feature_cols}")
+
+        X_train = self.train_df[safe_feature_cols]
         y_train = self.train_df[target_col].astype(int)
 
-        X_val = self.test_df[feature_cols]
+        X_val = self.test_df[safe_feature_cols]
         y_val = self.test_df[target_col].astype(int)
 
-        logger.info(f"训练特征数量: {len(feature_cols)}")
-        logger.info(f"使用的特征: {feature_cols[:10]}...")
+        logger.info(f"训练特征数量: {len(safe_feature_cols)}")
+        logger.info(f"使用的特征: {safe_feature_cols[:10]}...")
 
         # 设置分类特征
         for col in categorical_cols:
-            if col in feature_cols:
+            if col in safe_feature_cols:
                 X_train[col] = X_train[col].astype('category')
                 X_val[col] = X_val[col].astype('category')
 
@@ -884,13 +900,13 @@ class SteamRecommender:
         train_data = lgb.Dataset(
             X_train,
             label=y_train,
-            categorical_feature=[col for col in categorical_cols if col in feature_cols]
+            categorical_feature=[col for col in categorical_cols if col in safe_feature_cols]
         )
 
         val_data = lgb.Dataset(
             X_val,
             label=y_val,
-            categorical_feature=[col for col in categorical_cols if col in feature_cols],
+            categorical_feature=[col for col in categorical_cols if col in safe_feature_cols],
             reference=train_data
         )
 
@@ -927,7 +943,7 @@ class SteamRecommender:
 
         # 特征重要性
         feature_importance = pd.DataFrame({
-            'Feature': feature_cols,
+            'Feature': safe_feature_cols,
             'Importance': self.lgbm_model.feature_importance(importance_type='gain')
         }).sort_values(by='Importance', ascending=False)
 
@@ -1049,6 +1065,13 @@ class SteamRecommender:
         self.game_embeddings = {}
 
         logger.info("序列模型训练完成")
+        # 保存使用的特征列表，以便在预测时使用
+        self.sequence_feature_columns = feature_cols
+
+        # 记录特征数量
+        logger.info(f"序列模型输入维度: {len(feature_cols)}")
+        self.sequence_feature_length = len(feature_cols)
+
         return self.sequence_model
 
     def prepare_sequence_data(self, df):
@@ -1189,7 +1212,7 @@ class SteamRecommender:
         user_games.update(user_test_games)
 
         # 从热门游戏中筛选候选集
-        candidate_size = min(500, len(self.game_df))  # 只考虑最多500款游戏
+        candidate_size = min(50000, len(self.game_df))  # 只考虑最多500款游戏
         top_games = set(self.game_df.sort_values('user_count', ascending=False)
                         .head(candidate_size)['app_id'].values)
         candidate_games = top_games - user_games
@@ -1204,6 +1227,14 @@ class SteamRecommender:
         for game_id in candidate_games:
             score = self.predict_score(user_id, game_id)
             predictions.append((game_id, score))
+
+        # 在generate_recommendations方法中添加日志
+        logger.info(f"为用户{user_id}生成推荐，候选游戏数:{len(candidate_games)}")
+        logger.info(f"用户特征: {self.user_df[self.user_df['user_id'] == user_id].to_dict()}")
+
+        # 记录前几个预测分数
+        for i, (game_id, score) in enumerate(predictions[:5]):
+            logger.info(f"游戏{game_id}预测分数:{score}")
 
         # 按分数降序排列
         recommendations = sorted(predictions, key=lambda x: x[1], reverse=True)[:n]
@@ -1363,63 +1394,52 @@ class SteamRecommender:
         if not hasattr(self, 'sequence_model') or self.sequence_model is None:
             return 0.5
 
-        # 尝试获取用户和游戏的特征
-        user_features = None
-        if user_id in self.user_df['user_id'].values:
-            user_features = self.user_df[self.user_df['user_id'] == user_id].iloc[0]
+        try:
+            # 确保有保存的特征列表
+            if not hasattr(self, 'sequence_feature_columns'):
+                logger.error("缺少序列特征列表，无法进行预测")
+                return 0.5
 
-        game_features = None
-        if game_id in self.game_df['app_id'].values:
-            game_features = self.game_df[self.game_df['app_id'] == game_id].iloc[0]
+            # 创建与训练特征完全匹配的特征字典
+            features = {}
+            for col in self.sequence_feature_columns:
+                features[col] = 0.0  # 默认值
 
-        if user_features is None or game_features is None:
+            # 尝试填充实际值
+            user_data = None
+            if hasattr(self, 'user_df') and user_id in self.user_df['user_id'].values:
+                user_data = self.user_df[self.user_df['user_id'] == user_id].iloc[0]
+
+                # 填充用户特征
+                if 'game_count' in self.sequence_feature_columns and 'game_count' in user_data:
+                    features['game_count'] = user_data['game_count']
+
+                if 'prev_game_count' in self.sequence_feature_columns and 'game_count' in user_data:
+                    features['prev_game_count'] = user_data['game_count']
+
+                if 'avg_prev_rating' in self.sequence_feature_columns and 'recommendation_ratio' in user_data:
+                    features['avg_prev_rating'] = user_data['recommendation_ratio']
+
+                if 'total_hours' in self.sequence_feature_columns and 'total_hours' in user_data:
+                    features['total_hours'] = user_data['total_hours']
+
+            # 使用完全一致的特征顺序
+            feature_vector = [features[col] for col in self.sequence_feature_columns]
+
+            # 打印特征向量（调试用）
+            logger.debug(f"序列模型输入特征（{len(feature_vector)}维）: {feature_vector}")
+
+            # 转换为张量并预测
+            input_tensor = torch.FloatTensor([feature_vector]).to(self.device)
+
+            self.sequence_model.eval()
+            with torch.no_grad():
+                score = self.sequence_model(input_tensor).item()
+                return score
+
+        except Exception as e:
+            logger.error(f"序列模型预测出错: {str(e)}")
             return 0.5
-
-        # 创建必要的特征
-        features = {}
-
-        # 序列特征
-        features['prev_game_count'] = user_features.get('game_count', 0)
-        features['avg_prev_rating'] = user_features.get('recommendation_ratio', 0.5)
-        features['last_game_hours'] = 0  # 这个需要从历史中获取，这里简化为0
-
-        # 其他可能用到的特征
-        features['hours'] = 0  # 还没有游玩时间
-        features['hours_log'] = 0
-        features['recommendation_ratio'] = game_features.get('recommendation_ratio', 0.5)
-        features['total_hours'] = user_features.get('total_hours', 0)
-        features['game_count'] = user_features.get('game_count', 0)
-
-        # 创建特征向量
-        feature_values = []
-        seq_features = [
-            'prev_game_count',
-            'avg_prev_rating',
-            'last_game_hours',
-            'hours',
-            'hours_log',
-            'recommendation_ratio',
-            'total_hours',
-            'game_count'
-        ]
-
-        for feat in seq_features:
-            if hasattr(self.sequence_model, 'layers') and feat in features:
-                feature_values.append(features[feat])
-
-        # 如果没有特征，返回默认值
-        if not feature_values:
-            return 0.5
-
-        # 转换为张量并预测
-        input_tensor = torch.FloatTensor([feature_values]).to(self.device)
-
-        # 预测
-        self.sequence_model.eval()
-        with torch.no_grad():
-            score = self.sequence_model(input_tensor).item()
-
-        return score
 
     def predict_content_score(self, user_id, game_id):
         """使用基于内容的模型预测得分"""
@@ -2197,7 +2217,7 @@ def main():
     )
 
     # 初始化推荐系统
-    recommender = SteamRecommender('steam_top_1000000.csv')
+    recommender = SteamRecommender('steam_top_100000.csv')
 
     # 加载数据
     recommender.load_data()
