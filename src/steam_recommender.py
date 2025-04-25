@@ -1554,6 +1554,377 @@ class SteamRecommender:
         logger.info(f"模型加载完成")
         return True
 
+    def get_content_recommendations(self, app_id, top_n=10):
+        """
+        基于内容的推荐，给定一个游戏ID，推荐相似的游戏
+
+        参数:
+            app_id: 游戏ID
+            top_n: 推荐数量
+
+        返回:
+            list: [(game_id, score), ...] 推荐游戏列表
+        """
+        logger.info(f"为游戏 {app_id} 生成内容推荐")
+
+        # 检查内容相似度矩阵是否存在
+        if not hasattr(self, 'content_similarity') or self.content_similarity is None:
+            logger.warning("内容相似度矩阵不存在，返回热门游戏")
+            return self.get_popular_games(top_n)
+
+        # 检查游戏是否在相似度矩阵中
+        if app_id not in self.content_similarity['game_idx']:
+            logger.warning(f"游戏 {app_id} 不在相似度矩阵中，返回热门游戏")
+            return self.get_popular_games(top_n)
+
+        # 获取游戏索引
+        idx = self.content_similarity['game_idx'][app_id]
+
+        # 获取相似度分数
+        sim_scores = self.content_similarity['matrix'][idx]
+
+        # 创建游戏ID到索引的反向映射
+        reverse_idx = {idx: game_id for game_id, idx in self.content_similarity['game_idx'].items()}
+
+        # 找出最相似的游戏（排除自己）
+        sim_items = [(reverse_idx[i], sim_scores[i])
+                     for i in range(len(sim_scores))
+                     if i != idx and i in reverse_idx]
+
+        # 排序并获取前N个
+        recommendations = sorted(sim_items, key=lambda x: x[1], reverse=True)[:top_n]
+
+        return recommendations
+
+
+# 在steam_recommender.py文件中添加以下增量训练方法
+
+def update_lgbm_model(self, new_data_df):
+    """
+    增量更新LightGBM模型
+
+    参数:
+        new_data_df (DataFrame): 新的交互数据
+    """
+    logger.info("开始增量更新LightGBM模型...")
+
+    if not hasattr(self, 'lgbm_model') or self.lgbm_model is None:
+        logger.warning("LightGBM模型不存在，将进行完整训练")
+        self.train_lgbm_model()
+        return
+
+    try:
+        # 确保新数据包含必要的列
+        required_cols = ['user_id', 'app_id', 'is_recommended']
+        if not all(col in new_data_df.columns for col in required_cols):
+            logger.error("新数据缺少必要的列，无法执行增量训练")
+            return
+
+        # 合并新数据到现有数据集
+        # 注意：这里假设self.df已经存在
+        if not hasattr(self, 'df') or self.df is None:
+            logger.error("基础数据集不存在，无法执行增量训练")
+            return
+
+        # 复制一份当前数据
+        current_df = self.df.copy()
+
+        # 为新数据添加必要的特征
+        # 这里需要执行与原始特征工程相同的步骤
+        for idx, row in new_data_df.iterrows():
+            user_id = row['user_id']
+            app_id = row['app_id']
+
+            # 检查是否已存在该交互
+            mask = (current_df['user_id'] == user_id) & (current_df['app_id'] == app_id)
+            if sum(mask) > 0:
+                # 更新现有记录
+                for col in new_data_df.columns:
+                    if col in current_df.columns:
+                        current_df.loc[mask, col] = row[col]
+            else:
+                # 添加新记录
+                current_df = pd.concat([current_df, pd.DataFrame([row])])
+
+        # 更新基础数据集
+        self.df = current_df
+
+        # 重新执行特征工程
+        self.engineer_features()
+
+        # 获取训练数据
+        target_col = 'is_recommended'
+        id_cols = ['user_id', 'app_id', 'date', 'review_id', 'prev_apps', 'prev_ratings', 'prev_hours']
+        categorical_cols = [col for col in self.train_df.columns if col.endswith('_encoded')]
+
+        # 移除不能用作特征的列
+        exclude_cols = id_cols + [target_col, 'tags', 'description']
+
+        # 只选择数值型和布尔型特征
+        feature_cols = []
+        for col in self.train_df.columns:
+            if col in exclude_cols or pd.api.types.is_list_like(self.train_df[col].iloc[0]):
+                continue
+            if self.train_df[col].dtype in [np.int64, np.float64, np.bool_]:
+                feature_cols.append(col)
+
+        X_train = self.train_df[feature_cols]
+        y_train = self.train_df[target_col].astype(int)
+
+        X_val = self.test_df[feature_cols]
+        y_val = self.test_df[target_col].astype(int)
+
+        # 设置分类特征
+        for col in categorical_cols:
+            if col in feature_cols:
+                X_train[col] = X_train[col].astype('category')
+                X_val[col] = X_val[col].astype('category')
+
+        # 创建LightGBM数据集
+        train_data = lgb.Dataset(
+            X_train,
+            label=y_train,
+            categorical_feature=[col for col in categorical_cols if col in feature_cols]
+        )
+
+        val_data = lgb.Dataset(
+            X_val,
+            label=y_val,
+            categorical_feature=[col for col in categorical_cols if col in feature_cols],
+            reference=train_data
+        )
+
+        # 使用现有模型作为初始模型，继续训练
+        callbacks = [lgb.early_stopping(50), lgb.log_evaluation(50)]
+
+        # 调整训练参数以适应增量训练
+        incremental_params = self.config.get('lgbm_params', {}).copy()
+        incremental_params['learning_rate'] = incremental_params.get('learning_rate', 0.05) * 0.5  # 降低学习率
+        incremental_params['num_boost_round'] = 200  # 减少迭代次数
+
+        # 使用现有模型继续训练
+        self.lgbm_model = lgb.train(
+            params=incremental_params,
+            train_set=train_data,
+            valid_sets=[train_data, val_data],
+            valid_names=['train', 'valid'],
+            callbacks=callbacks,
+            init_model=self.lgbm_model,  # 使用现有模型
+            num_boost_round=incremental_params['num_boost_round']
+        )
+
+        # 评估更新后的模型
+        lgbm_preds = self.lgbm_model.predict(X_val)
+        auc_score = roc_auc_score(y_val, lgbm_preds)
+        logger.info(f"更新后的LightGBM模型验证AUC: {auc_score:.4f}")
+
+        # 更新特征重要性
+        self.feature_importance = pd.DataFrame({
+            'Feature': feature_cols,
+            'Importance': self.lgbm_model.feature_importance(importance_type='gain')
+        }).sort_values(by='Importance', ascending=False)
+
+        logger.info("LightGBM模型增量更新完成")
+
+    except Exception as e:
+        logger.error(f"增量更新LightGBM模型时出错: {str(e)}")
+
+
+def update_sequence_model(self, new_data_df):
+    """
+    增量更新序列模型
+
+    参数:
+        new_data_df (DataFrame): 新的交互数据
+    """
+    logger.info("开始增量更新序列模型...")
+
+    if not hasattr(self, 'sequence_model') or self.sequence_model is None:
+        logger.warning("序列模型不存在，将进行完整训练")
+        self.train_sequence_model()
+        return
+
+    try:
+        # 确保新数据包含必要的列
+        required_cols = ['user_id', 'app_id', 'is_recommended']
+        if not all(col in new_data_df.columns for col in required_cols):
+            logger.error("新数据缺少必要的列，无法执行增量训练")
+            return
+
+        # 合并新数据到现有数据集
+        # 这一步应该在update_lgbm_model中已经完成
+
+        # 重新创建序列特征
+        self.create_sequence_features()
+
+        # 准备序列数据
+        train_data = self.prepare_sequence_data(self.train_df)
+
+        # 检查是否有足够的序列数据
+        if len(train_data['sequences']) == 0:
+            logger.warning("没有足够的序列数据，跳过序列模型更新")
+            return
+
+        # 创建数据集和数据加载器
+        train_dataset = torch.utils.data.Dataset(
+            train_data['sequences'],
+            train_data['targets']
+        )
+
+        # 数据整理函数
+        def collate_fn(batch):
+            # 提取序列和目标
+            sequences, targets = zip(*batch)
+
+            # 计算每个序列的长度
+            seq_lengths = torch.tensor([len(seq) for seq in sequences])
+
+            # 填充序列到相同长度
+            max_len = max(seq_lengths).item()
+            padded_sequences = torch.zeros(len(sequences), max_len, dtype=torch.long)
+
+            for i, seq in enumerate(sequences):
+                end = seq_lengths[i]
+                padded_sequences[i, :end] = torch.tensor(seq[:end])
+
+            # 转换目标为张量
+            targets = torch.tensor(targets, dtype=torch.float32)
+
+            return padded_sequences, seq_lengths, targets
+
+        # 创建数据加载器
+        train_loader = torch.utils.data.DataLoader(
+            train_dataset,
+            batch_size=self.config['sequence_params']['batch_size'],
+            shuffle=True,
+            collate_fn=collate_fn
+        )
+
+        # 设置模型为训练模式
+        self.sequence_model.train()
+
+        # 定义损失函数和优化器
+        criterion = nn.BCELoss()
+
+        # 使用较小的学习率进行增量更新
+        incremental_lr = self.config['sequence_params']['learning_rate'] * 0.1
+        optimizer = optim.Adam(self.sequence_model.parameters(), lr=incremental_lr)
+
+        # 训练模型（少量轮次）
+        epochs = min(5, self.config['sequence_params']['epochs'])
+
+        for epoch in range(epochs):
+            total_loss = 0
+
+            for sequences, seq_lengths, targets in train_loader:
+                # 移动数据到设备
+                sequences = sequences.to(self.device)
+                seq_lengths = seq_lengths.to(self.device)
+                targets = targets.to(self.device)
+
+                # 前向传播
+                optimizer.zero_grad()
+                outputs = self.sequence_model(sequences, seq_lengths)
+
+                # 计算损失
+                loss = criterion(outputs, targets)
+
+                # 反向传播
+                loss.backward()
+                optimizer.step()
+
+                total_loss += loss.item()
+
+            avg_loss = total_loss / len(train_loader)
+            logger.info(f"Epoch {epoch + 1}/{epochs}, Loss: {avg_loss:.4f}")
+
+        # 设置为评估模式
+        self.sequence_model.eval()
+
+        logger.info("序列模型增量更新完成")
+
+    except Exception as e:
+        logger.error(f"增量更新序列模型时出错: {str(e)}")
+
+
+def update_content_model(self, new_games_df):
+    """
+    增量更新内容模型
+
+    参数:
+        new_games_df (DataFrame): 新的游戏数据
+    """
+    logger.info("开始增量更新内容模型...")
+
+    try:
+        # 检查现有内容相似度矩阵是否存在
+        if not hasattr(self, 'content_similarity') or self.content_similarity is None:
+            logger.warning("内容相似度矩阵不存在，将进行完整训练")
+            self.train_content_model()
+            return
+
+        # 检查是否有新游戏
+        if 'app_id' not in new_games_df.columns:
+            logger.error("新数据缺少app_id列，无法执行增量训练")
+            return
+
+        # 获取已有的游戏ID集合
+        if hasattr(self, 'content_similarity') and 'game_idx' in self.content_similarity:
+            existing_game_ids = set(self.content_similarity['game_idx'].keys())
+        else:
+            existing_game_ids = set()
+
+        # 筛选新游戏
+        new_game_ids = set(new_games_df['app_id'].values) - existing_game_ids
+
+        if not new_game_ids:
+            logger.info("没有新的游戏，跳过内容模型更新")
+            return
+
+        logger.info(f"发现 {len(new_game_ids)} 个新游戏，更新内容模型")
+
+        # 重新训练内容模型
+        # 这里简单地重新训练整个模型，因为添加新游戏需要重新计算相似度矩阵
+        self.train_content_model()
+
+        logger.info("内容模型增量更新完成")
+
+    except Exception as e:
+        logger.error(f"增量更新内容模型时出错: {str(e)}")
+
+
+# 封装所有增量更新为一个方法
+def incremental_update(self, interactions_df, games_df=None, users_df=None):
+    """
+    执行所有模型的增量更新
+
+    参数:
+        interactions_df (DataFrame): 用户-游戏交互数据
+        games_df (DataFrame): 游戏数据，可选
+        users_df (DataFrame): 用户数据，可选
+    """
+    logger.info("开始执行全面增量更新...")
+
+    try:
+        # 更新LightGBM模型
+        if len(interactions_df) > 0:
+            self.update_lgbm_model(interactions_df)
+
+        # 更新序列模型
+        if len(interactions_df) > 0:
+            self.update_sequence_model(interactions_df)
+
+        # 更新内容模型
+        if games_df is not None and len(games_df) > 0:
+            self.update_content_model(games_df)
+
+        # 更新游戏嵌入向量
+        self.create_game_embeddings()
+
+        logger.info("全面增量更新完成")
+
+    except Exception as e:
+        logger.error(f"执行增量更新时出错: {str(e)}")
 
 def main():
     """主函数，演示推荐系统的使用"""
