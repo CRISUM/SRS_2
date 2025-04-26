@@ -1244,45 +1244,48 @@ class SteamRecommender:
         # 缓存结果
         self.recommendation_cache[cache_key] = recommendations
 
+        for game_id in list(candidate_games)[:10]:  # 仅打印前10个游戏的详情
+            score = self.predict_score(user_id, game_id)
+            lgbm_score = self.lgbm_model.predict([features])[0] if self.lgbm_model else 0.5
+            seq_score = self.predict_sequence_score(user_id, game_id)
+            content_score = self.predict_content_score(user_id, game_id)
+            logger.info(
+                f"游戏{game_id}详细分数 - LGBM:{lgbm_score:.4f}, 序列:{seq_score:.4f}, 内容:{content_score:.4f}, 最终:{score:.4f}")
+
         return recommendations
 
     def predict_score(self, user_id, game_id):
-        """预测用户对游戏的评分"""
+        """预测用户对游戏的评分（KNN混合方式）"""
         # 使用缓存
         cache_key = f"{user_id}_{game_id}"
         if cache_key in self.score_cache:
             return self.score_cache[cache_key]
 
         try:
-            # 创建特征
-            features = self.extract_prediction_features(user_id, game_id)
+            # 计算用户KNN得分
+            user_knn_score = self.predict_user_knn_score(user_id, game_id)
 
-            # 输出调试信息
-            logger.debug(f"为用户 {user_id} 和游戏 {game_id} 提取的特征数量: {len(features)}")
+            # 计算物品KNN得分
+            item_knn_score = self.predict_item_knn_score(user_id, game_id)
 
-            # 安全检查：确保特征非空
-            if len(features) == 0 and self.lgbm_model is not None:
-                logger.warning(f"提取的特征为空！使用默认特征代替。")
-                features = np.zeros(len(self.lgbm_model.feature_name()))
-
-            # 使用LightGBM模型预测
-            if self.lgbm_model is not None:
-                # 设置predict_disable_shape_check=True以避免特征数量不匹配的错误
-                lgbm_score = self.lgbm_model.predict([features], predict_disable_shape_check=True)[0]
-            else:
-                lgbm_score = 0.5
-
-            # 使用序列模型预测
+            # 计算序列模型得分
             seq_score = self.predict_sequence_score(user_id, game_id)
 
-            # 使用内容模型预测
+            # 计算内容模型得分
             content_score = self.predict_content_score(user_id, game_id)
+
+            # 分配权重 (调整为适合KNN的新权重)
+            user_knn_weight = 0.3
+            item_knn_weight = 0.3
+            sequence_weight = 0.2
+            content_weight = 0.2
 
             # 加权平均
             final_score = (
-                    self.config['lgbm_weight'] * lgbm_score +
-                    self.config['sequence_weight'] * seq_score +
-                    self.config['content_weight'] * content_score
+                    user_knn_weight * user_knn_score +
+                    item_knn_weight * item_knn_score +
+                    sequence_weight * seq_score +
+                    content_weight * content_score
             )
 
             # 缓存结果
@@ -1676,13 +1679,35 @@ class SteamRecommender:
         # 创建保存目录
         os.makedirs(path, exist_ok=True)
 
-        # 保存LightGBM模型
-        if self.lgbm_model is not None:
-            self.lgbm_model.save_model(os.path.join(path, 'lgbm_model.txt'))
+        # 保存KNN模型相关数据
+        if hasattr(self, 'user_knn_model') and self.user_knn_model is not None:
+            # 保存索引映射
+            with open(os.path.join(path, 'user_indices.pkl'), 'wb') as f:
+                pickle.dump(self.user_indices, f)
+            with open(os.path.join(path, 'app_indices.pkl'), 'wb') as f:
+                pickle.dump(self.app_indices, f)
+            with open(os.path.join(path, 'reversed_user_indices.pkl'), 'wb') as f:
+                pickle.dump(self.reversed_user_indices, f)
+            with open(os.path.join(path, 'reversed_app_indices.pkl'), 'wb') as f:
+                pickle.dump(self.reversed_app_indices, f)
+
+            # 保存用户-游戏矩阵
+            if hasattr(self, 'user_game_matrix') and self.user_game_matrix is not None:
+                self.user_game_matrix.to_pickle(os.path.join(path, 'user_game_matrix.pkl'))
+
+            # 保存KNN模型
+            with open(os.path.join(path, 'user_knn_model.pkl'), 'wb') as f:
+                pickle.dump(self.user_knn_model, f)
+            with open(os.path.join(path, 'item_knn_model.pkl'), 'wb') as f:
+                pickle.dump(self.item_knn_model, f)
 
         # 保存序列模型
         if hasattr(self, 'sequence_model') and self.sequence_model is not None:
             torch.save(self.sequence_model.state_dict(), os.path.join(path, 'sequence_model.pt'))
+            # 保存序列特征列表
+            if hasattr(self, 'sequence_feature_columns'):
+                with open(os.path.join(path, 'sequence_features.pkl'), 'wb') as f:
+                    pickle.dump(self.sequence_feature_columns, f)
 
         # 保存编码器和其他组件
         with open(os.path.join(path, 'label_encoders.pkl'), 'wb') as f:
@@ -1729,10 +1754,46 @@ class SteamRecommender:
             with open(config_path, 'r') as f:
                 self.config = json.load(f)
 
-        # 加载LightGBM模型
-        lgbm_path = os.path.join(path, 'lgbm_model.txt')
-        if os.path.exists(lgbm_path):
-            self.lgbm_model = lgb.Booster(model_file=lgbm_path)
+        # 加载KNN模型相关数据
+        user_indices_path = os.path.join(path, 'user_indices.pkl')
+        app_indices_path = os.path.join(path, 'app_indices.pkl')
+        reversed_user_indices_path = os.path.join(path, 'reversed_user_indices.pkl')
+        reversed_app_indices_path = os.path.join(path, 'reversed_app_indices.pkl')
+        user_game_matrix_path = os.path.join(path, 'user_game_matrix.pkl')
+        user_knn_model_path = os.path.join(path, 'user_knn_model.pkl')
+        item_knn_model_path = os.path.join(path, 'item_knn_model.pkl')
+
+        # 加载索引映射
+        if os.path.exists(user_indices_path):
+            with open(user_indices_path, 'rb') as f:
+                self.user_indices = pickle.load(f)
+
+        if os.path.exists(app_indices_path):
+            with open(app_indices_path, 'rb') as f:
+                self.app_indices = pickle.load(f)
+
+        if os.path.exists(reversed_user_indices_path):
+            with open(reversed_user_indices_path, 'rb') as f:
+                self.reversed_user_indices = pickle.load(f)
+
+        if os.path.exists(reversed_app_indices_path):
+            with open(reversed_app_indices_path, 'rb') as f:
+                self.reversed_app_indices = pickle.load(f)
+
+        # 加载用户-游戏矩阵
+        if os.path.exists(user_game_matrix_path):
+            self.user_game_matrix = pd.read_pickle(user_game_matrix_path)
+            # 重建稀疏矩阵
+            self.user_game_sparse_matrix = csr_matrix(self.user_game_matrix.values)
+
+        # 加载KNN模型
+        if os.path.exists(user_knn_model_path):
+            with open(user_knn_model_path, 'rb') as f:
+                self.user_knn_model = pickle.load(f)
+
+        if os.path.exists(item_knn_model_path):
+            with open(item_knn_model_path, 'rb') as f:
+                self.item_knn_model = pickle.load(f)
 
         # 加载编码器和其他组件
         encoders_path = os.path.join(path, 'label_encoders.pkl')
@@ -1767,10 +1828,16 @@ class SteamRecommender:
 
         # 加载序列模型
         sequence_path = os.path.join(path, 'sequence_model.pt')
+        sequence_features_path = os.path.join(path, 'sequence_features.pkl')
+
+        if os.path.exists(sequence_features_path):
+            with open(sequence_features_path, 'rb') as f:
+                self.sequence_feature_columns = pickle.load(f)
+
         if os.path.exists(sequence_path):
-            # 此处需要先初始化模型架构
-            # 这里简化处理，实际使用时需要重建完整的模型架构
+            # 需要先初始化模型架构，再加载权重
             logger.info("序列模型存在但需要手动重建模型架构后再加载权重")
+            # 可以在这里添加序列模型重建逻辑
 
         logger.info(f"模型加载完成")
         return True
@@ -1880,6 +1947,220 @@ class SteamRecommender:
             import traceback
             logger.error(traceback.format_exc())
             return False
+
+    def train_knn_model(self):
+        """训练KNN模型，替代LightGBM模型"""
+        logger.info("开始训练KNN模型...")
+
+        # 检查是否有足够的数据
+        if not hasattr(self, 'train_df') or self.train_df is None or len(self.train_df) == 0:
+            logger.error("训练数据不足，无法训练KNN模型")
+            return None
+
+        # 创建用户-游戏交互矩阵
+        # 使用用户-游戏评分（如果有）或者是否推荐作为交互值
+        if 'rating' in self.train_df.columns:
+            rating_col = 'rating'
+        elif 'is_recommended' in self.train_df.columns:
+            # 将布尔值转换为0和1
+            self.train_df['rating_value'] = self.train_df['is_recommended'].astype(int) * 10
+            rating_col = 'rating_value'
+        else:
+            # 如果没有评分或推荐，使用游戏时间作为交互值
+            rating_col = 'hours'
+
+        # 创建透视表
+        user_game_matrix = pd.pivot_table(
+            self.train_df,
+            values=rating_col,
+            index='user_id',
+            columns='app_id',
+            aggfunc='mean',
+            fill_value=0
+        )
+
+        logger.info(f"创建的用户-游戏矩阵大小: {user_game_matrix.shape}")
+
+        # 存储用户和游戏ID映射，用于后续推荐
+        self.user_indices = {user: i for i, user in enumerate(user_game_matrix.index)}
+        self.app_indices = {app: i for i, app in enumerate(user_game_matrix.columns)}
+        self.reversed_user_indices = {i: user for user, i in self.user_indices.items()}
+        self.reversed_app_indices = {i: app for app, i in self.app_indices.items()}
+
+        # 转换为稀疏矩阵提高效率
+        matrix = csr_matrix(user_game_matrix.values)
+
+        # 创建基于用户的KNN模型
+        self.user_knn_model = NearestNeighbors(
+            metric='cosine',
+            algorithm='brute',
+            n_neighbors=min(20, len(self.user_indices)),
+            n_jobs=-1
+        )
+        self.user_knn_model.fit(matrix)
+
+        # 创建基于物品的KNN模型
+        self.item_knn_model = NearestNeighbors(
+            metric='cosine',
+            algorithm='brute',
+            n_neighbors=min(20, len(self.app_indices)),
+            n_jobs=-1
+        )
+        self.item_knn_model.fit(matrix.T)  # 转置矩阵用于物品相似度
+
+        # 存储原始矩阵以便后续计算
+        self.user_game_matrix = user_game_matrix
+        self.user_game_sparse_matrix = matrix
+
+        logger.info("KNN模型训练完成")
+        return (self.user_knn_model, self.item_knn_model)
+
+    def predict_user_knn_score(self, user_id, app_id):
+        """使用用户KNN预测评分"""
+        if not hasattr(self, 'user_knn_model') or self.user_knn_model is None:
+            return 0.5
+
+        try:
+            # 检查用户和游戏是否在训练数据中
+            if user_id not in self.user_indices or app_id not in self.app_indices:
+                return 0.5
+
+            # 获取用户索引
+            user_idx = self.user_indices[user_id]
+            app_idx = self.app_indices[app_id]
+
+            # 获取用户的向量
+            user_vector = self.user_game_sparse_matrix[user_idx].toarray().reshape(1, -1)
+
+            # 找到最相似的用户
+            distances, indices = self.user_knn_model.kneighbors(user_vector, n_neighbors=10)
+
+            # 计算相似用户的加权评分
+            similar_users = indices[0]
+            similarities = 1 - distances[0]  # 将距离转换为相似度
+
+            # 过滤掉用户自己
+            if user_idx in similar_users:
+                user_idx_pos = np.where(similar_users == user_idx)[0][0]
+                similar_users = np.delete(similar_users, user_idx_pos)
+                similarities = np.delete(similarities, user_idx_pos)
+
+            if len(similar_users) == 0:
+                return 0.5
+
+            # 计算相似用户对目标游戏的评分
+            ratings = []
+            weights = []
+
+            for i, similar_user_idx in enumerate(similar_users):
+                similar_user_id = self.reversed_user_indices[similar_user_idx]
+                # 查找该用户对该游戏的评分
+                similar_user_data = self.train_df[
+                    (self.train_df['user_id'] == similar_user_id) &
+                    (self.train_df['app_id'] == app_id)
+                    ]
+
+                if len(similar_user_data) > 0:
+                    # 获取评分（优先使用rating，其次是is_recommended）
+                    if 'rating' in similar_user_data.columns:
+                        rating = similar_user_data['rating'].iloc[0]
+                    elif 'is_recommended' in similar_user_data.columns:
+                        rating = 10 if similar_user_data['is_recommended'].iloc[0] else 0
+                    else:
+                        # 如果没有评分或推荐，使用归一化的游戏时间
+                        hours = similar_user_data['hours'].iloc[0]
+                        rating = min(10, hours / 10)  # 将时间映射到0-10的范围
+
+                    ratings.append(rating)
+                    weights.append(similarities[i])
+
+            # 如果没有相似用户评价过该游戏，返回默认分数
+            if len(ratings) == 0:
+                return 0.5
+
+            # 计算加权平均评分
+            weighted_rating = np.average(ratings, weights=weights)
+            # 将评分归一化到0-1范围
+            normalized_rating = weighted_rating / 10
+
+            return normalized_rating
+
+        except Exception as e:
+            logger.error(f"用户KNN预测出错: {str(e)}")
+            return 0.5
+
+    def predict_item_knn_score(self, user_id, app_id):
+        """使用物品KNN预测评分"""
+        if not hasattr(self, 'item_knn_model') or self.item_knn_model is None:
+            return 0.5
+
+        try:
+            # 检查用户和游戏是否在训练数据中
+            if app_id not in self.app_indices:
+                return 0.5
+
+            # 获取游戏索引
+            app_idx = self.app_indices[app_id]
+
+            # 获取游戏的向量
+            item_vector = self.user_game_sparse_matrix.T[app_idx].toarray().reshape(1, -1)
+
+            # 找到最相似的游戏
+            distances, indices = self.item_knn_model.kneighbors(item_vector, n_neighbors=10)
+
+            # 计算相似游戏的加权评分
+            similar_items = indices[0]
+            similarities = 1 - distances[0]  # 将距离转换为相似度
+
+            # 过滤掉游戏自己
+            if app_idx in similar_items:
+                app_idx_pos = np.where(similar_items == app_idx)[0][0]
+                similar_items = np.delete(similar_items, app_idx_pos)
+                similarities = np.delete(similarities, app_idx_pos)
+
+            if len(similar_items) == 0:
+                return 0.5
+
+            # 计算用户对相似游戏的评分
+            ratings = []
+            weights = []
+
+            for i, similar_item_idx in enumerate(similar_items):
+                similar_app_id = self.reversed_app_indices[similar_item_idx]
+                # 查找用户对该游戏的评分
+                user_rating_data = self.train_df[
+                    (self.train_df['user_id'] == user_id) &
+                    (self.train_df['app_id'] == similar_app_id)
+                    ]
+
+                if len(user_rating_data) > 0:
+                    # 获取评分
+                    if 'rating' in user_rating_data.columns:
+                        rating = user_rating_data['rating'].iloc[0]
+                    elif 'is_recommended' in user_rating_data.columns:
+                        rating = 10 if user_rating_data['is_recommended'].iloc[0] else 0
+                    else:
+                        # 如果没有评分或推荐，使用归一化的游戏时间
+                        hours = user_rating_data['hours'].iloc[0]
+                        rating = min(10, hours / 10)  # 将时间映射到0-10的范围
+
+                    ratings.append(rating)
+                    weights.append(similarities[i])
+
+            # 如果用户没有评价过任何相似游戏，返回默认分数
+            if len(ratings) == 0:
+                return 0.5
+
+            # 计算加权平均评分
+            weighted_rating = np.average(ratings, weights=weights)
+            # 将评分归一化到0-1范围
+            normalized_rating = weighted_rating / 10
+
+            return normalized_rating
+
+        except Exception as e:
+            logger.error(f"物品KNN预测出错: {str(e)}")
+            return 0.5
 
 def update_lgbm_model(self, new_data_df):
     """
@@ -2188,25 +2469,353 @@ def incremental_update(self, interactions_df, games_df=None, users_df=None):
     logger.info("开始执行全面增量更新...")
 
     try:
-        # 更新LightGBM模型
+        # 更新KNN模型
         if len(interactions_df) > 0:
-            self.update_lgbm_model(interactions_df)
+            self.update_knn_model(interactions_df)
 
         # 更新序列模型
-        if len(interactions_df) > 0:
+        if len(interactions_df) > 0 and hasattr(self, 'update_sequence_model'):
             self.update_sequence_model(interactions_df)
 
         # 更新内容模型
-        if games_df is not None and len(games_df) > 0:
+        if games_df is not None and len(games_df) > 0 and hasattr(self, 'update_content_model'):
             self.update_content_model(games_df)
 
         # 更新游戏嵌入向量
-        self.create_game_embeddings()
+        if hasattr(self, 'create_game_embeddings'):
+            self.create_game_embeddings()
+
+        # 清除推荐缓存
+        self.recommendation_cache = {}
+        self.score_cache = {}
+        self.feature_cache = {}
 
         logger.info("全面增量更新完成")
 
     except Exception as e:
         logger.error(f"执行增量更新时出错: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+
+def update_knn_model(self, new_data_df):
+    """
+    增量更新KNN模型
+
+    参数:
+        new_data_df (DataFrame): 新的交互数据
+    """
+    logger.info("开始增量更新KNN模型...")
+
+    if not hasattr(self, 'user_knn_model') or self.user_knn_model is None:
+        logger.warning("KNN模型不存在，将进行完整训练")
+        self.train_knn_model()
+        return
+
+    try:
+        # 确保新数据包含必要的列
+        required_cols = ['user_id', 'app_id']
+        if not all(col in new_data_df.columns for col in required_cols):
+            logger.error("新数据缺少必要的列，无法执行增量训练")
+            return
+
+        # 检查评分列
+        if 'rating' in new_data_df.columns:
+            rating_col = 'rating'
+        elif 'is_recommended' in new_data_df.columns:
+            new_data_df['rating_value'] = new_data_df['is_recommended'].astype(int) * 10
+            rating_col = 'rating_value'
+        elif 'hours' in new_data_df.columns:
+            rating_col = 'hours'
+        else:
+            logger.error("新数据缺少评分相关列，无法执行增量训练")
+            return
+
+        # 将新数据合并到原始数据
+        if not hasattr(self, 'user_game_matrix') or self.user_game_matrix is None:
+            logger.error("原始用户-游戏矩阵不存在，无法执行增量训练")
+            return
+
+        # 遍历新数据，更新用户-游戏矩阵
+        for _, row in new_data_df.iterrows():
+            user_id = row['user_id']
+            app_id = row['app_id']
+            rating = row[rating_col]
+
+            # 如果是新用户或新游戏，需要扩展矩阵
+            if user_id not in self.user_indices:
+                # 为新用户添加一行
+                new_user_idx = len(self.user_indices)
+                self.user_indices[user_id] = new_user_idx
+                self.reversed_user_indices[new_user_idx] = user_id
+
+                # 在矩阵中添加一行
+                new_row = pd.DataFrame(
+                    [0] * len(self.user_game_matrix.columns),
+                    index=[user_id],
+                    columns=self.user_game_matrix.columns
+                )
+                self.user_game_matrix = pd.concat([self.user_game_matrix, new_row])
+
+            if app_id not in self.app_indices:
+                # 为新游戏添加一列
+                new_app_idx = len(self.app_indices)
+                self.app_indices[app_id] = new_app_idx
+                self.reversed_app_indices[new_app_idx] = app_id
+
+                # 在矩阵中添加一列
+                self.user_game_matrix[app_id] = 0
+
+            # 更新评分
+            self.user_game_matrix.at[user_id, app_id] = rating
+
+        # 更新稀疏矩阵
+        self.user_game_sparse_matrix = csr_matrix(self.user_game_matrix.values)
+
+        # 重新训练KNN模型
+        self.user_knn_model = NearestNeighbors(
+            metric='cosine',
+            algorithm='brute',
+            n_neighbors=min(20, len(self.user_indices)),
+            n_jobs=-1
+        )
+        self.user_knn_model.fit(self.user_game_sparse_matrix)
+
+        # 更新物品KNN模型
+        self.item_knn_model = NearestNeighbors(
+            metric='cosine',
+            algorithm='brute',
+            n_neighbors=min(20, len(self.app_indices)),
+            n_jobs=-1
+        )
+        self.item_knn_model.fit(self.user_game_sparse_matrix.T)
+
+        logger.info("KNN模型增量更新完成")
+
+    except Exception as e:
+        logger.error(f"增量更新KNN模型时出错: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+
+
+def generate_hybrid_recommendations(self, user_id, n=10):
+    """
+    生成多样化的混合推荐
+
+    参数:
+        user_id (int): 用户ID
+        n (int): 推荐数量
+
+    返回:
+        list: [(game_id, score), ...] 推荐游戏列表
+    """
+    logger.info(f"为用户 {user_id} 生成混合推荐...")
+
+    # 使用缓存
+    cache_key = f"hybrid_{user_id}_{n}"
+    if cache_key in self.recommendation_cache:
+        return self.recommendation_cache[cache_key]
+
+    # 对于新用户或找不到的用户，使用热门推荐
+    if not hasattr(self, 'user_indices') or user_id not in self.user_indices:
+        logger.warning(f"用户 {user_id} 未在训练数据中找到")
+        return self.get_popular_games(n)
+
+    # 获取用户已经评论过的游戏
+    user_games = set()
+
+    # 从训练集获取
+    if hasattr(self, 'train_df'):
+        user_train_games = self.train_df[self.train_df['user_id'] == user_id]['app_id'].values
+        user_games.update(user_train_games)
+
+    # 从测试集获取
+    if hasattr(self, 'test_df'):
+        user_test_games = self.test_df[self.test_df['user_id'] == user_id]['app_id'].values
+        user_games.update(user_test_games)
+
+    # 准备三种不同的推荐方法
+    knn_recs = self.generate_knn_recommendations(user_id, n)
+    content_recs = self.generate_content_based_recommendations(user_id, n)
+    popular_recs = self.get_popular_games(n)
+
+    # 每种方法的权重
+    knn_weight = 0.5
+    content_weight = 0.3
+    popular_weight = 0.2
+
+    # 合并推荐结果，避免重复
+    merged_scores = {}
+
+    # 处理KNN推荐
+    for game_id, score in knn_recs:
+        if game_id not in user_games:  # 过滤已交互的游戏
+            merged_scores[game_id] = score * knn_weight
+
+    # 处理基于内容的推荐
+    for game_id, score in content_recs:
+        if game_id not in user_games:  # 过滤已交互的游戏
+            if game_id in merged_scores:
+                merged_scores[game_id] += score * content_weight
+            else:
+                merged_scores[game_id] = score * content_weight
+
+    # 处理热门推荐（确保新用户也有推荐结果）
+    for game_id, score in popular_recs:
+        if game_id not in user_games:  # 过滤已交互的游戏
+            if game_id in merged_scores:
+                merged_scores[game_id] += score * popular_weight
+            else:
+                merged_scores[game_id] = score * popular_weight
+
+    # 按分数排序
+    sorted_games = sorted(
+        [(game_id, score) for game_id, score in merged_scores.items()],
+        key=lambda x: x[1],
+        reverse=True
+    )
+
+    # 取前N个结果
+    recommendations = sorted_games[:n]
+
+    # 缓存结果
+    self.recommendation_cache[cache_key] = recommendations
+
+    logger.info(f"为用户 {user_id} 生成了 {len(recommendations)} 条混合推荐")
+    return recommendations
+
+
+def generate_knn_recommendations(self, user_id, n=10):
+    """
+    使用KNN生成推荐
+
+    参数:
+        user_id (int): 用户ID
+        n (int): 推荐数量
+
+    返回:
+        list: [(game_id, score), ...] 推荐游戏列表
+    """
+    # 检查用户是否在KNN模型中
+    if not hasattr(self, 'user_indices') or user_id not in self.user_indices:
+        return self.get_popular_games(n)
+
+    try:
+        # 获取用户已评价的游戏
+        user_games = set()
+        if hasattr(self, 'train_df'):
+            user_train_games = self.train_df[self.train_df['user_id'] == user_id]['app_id'].values
+            user_games.update(user_train_games)
+
+        if hasattr(self, 'test_df'):
+            user_test_games = self.test_df[self.test_df['user_id'] == user_id]['app_id'].values
+            user_games.update(user_test_games)
+
+        # 获取可能的游戏列表
+        candidate_games = set(self.app_indices.keys()) - user_games
+
+        # 如果没有候选游戏，返回热门游戏
+        if not candidate_games:
+            return self.get_popular_games(n)
+
+        # 为每个候选游戏计算预测得分
+        predictions = []
+        for game_id in candidate_games:
+            # 计算用户对游戏的预测得分
+            user_score = self.predict_user_knn_score(user_id, game_id)
+            item_score = self.predict_item_knn_score(user_id, game_id)
+
+            # 结合两种KNN得分
+            combined_score = (user_score + item_score) / 2
+            predictions.append((game_id, combined_score))
+
+        # 按得分排序
+        predictions.sort(key=lambda x: x[1], reverse=True)
+
+        # 返回前N个结果
+        return predictions[:n]
+
+    except Exception as e:
+        logger.error(f"生成KNN推荐时出错: {str(e)}")
+        return self.get_popular_games(n)
+
+
+def generate_content_based_recommendations(self, user_id, n=10):
+    """
+    基于用户偏好生成内容推荐
+
+    参数:
+        user_id (int): 用户ID
+        n (int): 推荐数量
+
+    返回:
+        list: [(game_id, score), ...] 推荐游戏列表
+    """
+    if not hasattr(self, 'content_similarity') or self.content_similarity is None:
+        return self.get_popular_games(n)
+
+    try:
+        # 获取用户喜欢的游戏
+        liked_games = []
+
+        if hasattr(self, 'train_df'):
+            liked_train = self.train_df[
+                (self.train_df['user_id'] == user_id) &
+                (self.train_df['is_recommended'] == True)
+                ]['app_id'].values
+            liked_games.extend(liked_train)
+
+        if hasattr(self, 'test_df'):
+            liked_test = self.test_df[
+                (self.test_df['user_id'] == user_id) &
+                (self.test_df['is_recommended'] == True)
+                ]['app_id'].values
+            liked_games.extend(liked_test)
+
+        # 如果用户没有喜欢的游戏，使用游戏时间较长的游戏
+        if not liked_games and hasattr(self, 'train_df'):
+            user_games = self.train_df[self.train_df['user_id'] == user_id]
+            if len(user_games) > 0:
+                # 按游戏时间排序
+                top_games = user_games.sort_values('hours', ascending=False).head(3)
+                liked_games = top_games['app_id'].values
+
+        # 如果还是没有游戏，返回热门游戏
+        if not liked_games:
+            return self.get_popular_games(n)
+
+        # 对每个喜欢的游戏找出相似游戏
+        all_similar_games = []
+
+        for game_id in liked_games:
+            if game_id in self.content_similarity['game_idx']:
+                similar_games = self.get_content_recommendations(game_id, n=10)
+                all_similar_games.extend(similar_games)
+
+        # 如果没有找到相似游戏，返回热门游戏
+        if not all_similar_games:
+            return self.get_popular_games(n)
+
+        # 合并相似游戏，按相似度排序
+        game_scores = {}
+        for game_id, score in all_similar_games:
+            if game_id not in liked_games:  # 排除用户已经喜欢的游戏
+                if game_id in game_scores:
+                    game_scores[game_id] = max(game_scores[game_id], score)
+                else:
+                    game_scores[game_id] = score
+
+        # 按分数排序
+        recommendations = sorted(
+            [(game_id, score) for game_id, score in game_scores.items()],
+            key=lambda x: x[1],
+            reverse=True
+        )
+
+        return recommendations[:n]
+
+    except Exception as e:
+        logger.error(f"生成内容推荐时出错: {str(e)}")
+        return self.get_popular_games(n)
 
 def main():
     """主函数，演示推荐系统的使用"""

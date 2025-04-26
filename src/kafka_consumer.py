@@ -208,6 +208,8 @@ class KafkaRecommenderService:
 
             logger.info("增量训练完成")
 
+    # 在kafka_consumer.py中修改perform_incremental_training方法
+
     def perform_incremental_training(self, interactions_df, games_df=None, users_df=None):
         """
         执行增量训练
@@ -224,10 +226,12 @@ class KafkaRecommenderService:
                 return
 
             # 如果是第一次训练，进行完整的模型训练
-            if not hasattr(self.recommender, 'lgbm_model') or self.recommender.lgbm_model is None:
+            if (not hasattr(self.recommender, 'user_knn_model') or self.recommender.user_knn_model is None or
+                    not hasattr(self.recommender, 'item_knn_model') or self.recommender.item_knn_model is None):
                 logger.info("执行首次完整模型训练...")
                 self.recommender.engineer_features()
-                self.recommender.train_lgbm_model()
+                # 使用KNN模型代替LightGBM模型
+                self.recommender.train_knn_model()
                 self.recommender.train_sequence_model()
                 self.recommender.create_game_embeddings()
                 self.recommender.train_content_model()
@@ -235,9 +239,8 @@ class KafkaRecommenderService:
                 # 否则执行增量更新
                 logger.info("执行增量模型更新...")
 
-                # 更新LightGBM模型（可能需要在SteamRecommender类中添加增量训练方法）
-                if hasattr(self.recommender, 'update_lgbm_model'):
-                    self.recommender.update_lgbm_model(interactions_df)
+                # 更新KNN模型
+                self.recommender.update_knn_model(interactions_df)
 
                 # 更新序列模型
                 if hasattr(self.recommender, 'update_sequence_model'):
@@ -258,6 +261,8 @@ class KafkaRecommenderService:
 
         except Exception as e:
             logger.error(f"增量训练出错: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
 
     def handle_message(self, data):
         """

@@ -23,6 +23,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# 修改kafka_recommender_service.py中的main函数
+
 def main():
     # 解析命令行参数
     parser = argparse.ArgumentParser(description='Steam游戏推荐Kafka服务')
@@ -61,7 +63,8 @@ def main():
                 logger.info("使用提供的数据训练新模型")
                 recommender.load_data()
                 recommender.engineer_features()
-                recommender.train_lgbm_model()
+                # 使用KNN模型代替LightGBM模型
+                recommender.train_knn_model()
                 recommender.train_sequence_model()
                 recommender.create_game_embeddings()
                 recommender.train_content_model()
@@ -70,7 +73,8 @@ def main():
         logger.info("使用提供的数据训练新模型")
         recommender.load_data()
         recommender.engineer_features()
-        recommender.train_lgbm_model()
+        # 使用KNN模型代替LightGBM模型
+        recommender.train_knn_model()
         recommender.train_sequence_model()
         recommender.create_game_embeddings()
         recommender.train_content_model()
@@ -90,7 +94,6 @@ def main():
 
     # 开始消费消息
     kafka_service.start_consuming(args.max)
-
 
 if __name__ == "__main__":
     main()
