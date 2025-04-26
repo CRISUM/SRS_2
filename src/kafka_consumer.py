@@ -212,55 +212,65 @@ class KafkaRecommenderService:
 
     def perform_incremental_training(self, interactions_df, games_df=None, users_df=None):
         """
-        执行增量训练
+        Execute incremental training
 
-        参数:
-            interactions_df: 用户-游戏交互数据
-            games_df: 游戏数据
-            users_df: 用户数据
+        Parameters:
+            interactions_df: User-game interaction data
+            games_df: Game data
+            users_df: User data
         """
         try:
-            # 首先确保推荐系统已经初始化
+            # First make sure recommender system is initialized
             if not hasattr(self.recommender, 'df') or self.recommender.df is None:
-                logger.warning("推荐系统未初始化，无法执行增量训练")
+                logger.warning("Recommender system not initialized, cannot perform incremental training")
                 return
 
-            # 如果是第一次训练，进行完整的模型训练
+            # If this is the first training, perform full model training
             if (not hasattr(self.recommender, 'user_knn_model') or self.recommender.user_knn_model is None or
                     not hasattr(self.recommender, 'item_knn_model') or self.recommender.item_knn_model is None):
-                logger.info("执行首次完整模型训练...")
+                logger.info("Performing first complete model training...")
                 self.recommender.engineer_features()
-                # 使用KNN模型代替LightGBM模型
+                # Use KNN models and alternative methods instead of LightGBM
                 self.recommender.train_knn_model()
+                self.recommender.train_svd_model()  # New SVD-based collaborative filtering
+                self.recommender.train_simple_model()  # Simple classifier replacing LightGBM
                 self.recommender.train_sequence_model()
                 self.recommender.create_game_embeddings()
                 self.recommender.train_content_model()
             else:
-                # 否则执行增量更新
-                logger.info("执行增量模型更新...")
+                # Otherwise, perform incremental update
+                logger.info("Executing incremental model update...")
 
-                # 更新KNN模型
+                # Update KNN models
                 self.recommender.update_knn_model(interactions_df)
 
-                # 更新序列模型
+                # Update SVD model
+                if hasattr(self.recommender, 'update_svd_model'):
+                    self.recommender.update_svd_model(interactions_df)
+
+                # Update simple model
+                if hasattr(self.recommender, 'update_simple_model'):
+                    self.recommender.update_simple_model(interactions_df)
+
+                # Update sequence model
                 if hasattr(self.recommender, 'update_sequence_model'):
                     self.recommender.update_sequence_model(interactions_df)
 
-                # 更新内容模型
+                # Update content model
                 if games_df is not None and len(games_df) > 0 and hasattr(self.recommender, 'update_content_model'):
                     self.recommender.update_content_model(games_df)
 
-                # 更新游戏嵌入
+                # Update game embeddings
                 if hasattr(self.recommender, 'create_game_embeddings'):
                     self.recommender.create_game_embeddings()
 
-            # 保存更新后的模型
+            # Save updated model
             if self.save_model_path:
                 self.recommender.save_model(self.save_model_path)
-                logger.info(f"已将更新后的模型保存至 {self.save_model_path}")
+                logger.info(f"Updated model saved to {self.save_model_path}")
 
         except Exception as e:
-            logger.error(f"增量训练出错: {str(e)}")
+            logger.error(f"Error in incremental training: {str(e)}")
             import traceback
             logger.error(traceback.format_exc())
 

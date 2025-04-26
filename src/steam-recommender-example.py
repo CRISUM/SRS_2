@@ -25,75 +25,220 @@ logger = logging.getLogger(__name__)
 
 def run_training_pipeline(data_path, config=None):
     """
-    运行完整的训练流程
+    Run the complete training pipeline
 
-    参数:
-        data_path (str): 数据文件路径
-        config (dict, optional): 配置参数
+    Parameters:
+        data_path (str): Data file path
+        config (dict, optional): Configuration parameters
     """
-    logger.info("开始训练流程...")
+    logger.info("Starting training pipeline...")
 
-    # 默认配置
+    # Default configuration
     if config is None:
         config = {
-            'lgbm_params': {
-                'objective': 'binary',
-                'metric': 'auc',
-                'boosting_type': 'gbdt',
-                'learning_rate': 0.05,
-                'num_leaves': 31,
-                'max_depth': -1,
-                'min_child_samples': 20,
-                'subsample': 0.8,
-                'colsample_bytree': 0.8,
-                'random_state': 42,
-                'n_estimators': 500,  # 减少迭代次数，加快训练
-                'early_stopping_rounds': 50,
-                'verbose': -1
-            },
+            # Remove LightGBM params
             'sequence_params': {
-                'embedding_dim': 32,  # 降低嵌入维度
-                'hidden_dim': 64,  # 降低隐藏层维度
-                'num_layers': 1,  # 减少层数
+                'embedding_dim': 32,  # Reduce embedding dimension
+                'hidden_dim': 64,  # Reduce hidden dimension
+                'num_layers': 1,  # Reduce number of layers
                 'dropout': 0.2,
                 'batch_size': 64,
                 'learning_rate': 0.001,
-                'epochs': 5  # 减少训练轮数
+                'epochs': 5  # Reduce training epochs
+            },
+            'knn_params': {  # New KNN parameters
+                'user_neighbors': 20,
+                'item_neighbors': 20,
+                'metric': 'cosine',
+                'algorithm': 'brute',
+            },
+            'svd_params': {  # New SVD parameters
+                'n_components': 50,
+                'random_state': 42,
             },
             'tag_embedding_dim': 30,
             'text_embedding_dim': 50,
             'max_seq_length': 10,
             'time_decay_factor': 0.9,
             'n_recommendations': 10,
-            'content_weight': 0.3,
-            'sequence_weight': 0.3,
-            'lgbm_weight': 0.4
+            # Update weights for hybrid recommendation
+            'user_knn_weight': 0.25,
+            'item_knn_weight': 0.25,
+            'svd_weight': 0.2,
+            'content_weight': 0.15,
+            'sequence_weight': 0.15
         }
 
-    # 初始化推荐系统
+    # Initialize recommendation system
     recommender = SteamRecommender(data_path, config)
 
-    # 执行训练流程
+    # Execute training pipeline
     recommender.load_data()
     recommender.engineer_features()
-    recommender.train_lgbm_model()
+
+    # Replace LightGBM with our new models
+    recommender.train_knn_model()
+    recommender.train_svd_model()
+    recommender.train_simple_model()
     recommender.train_sequence_model()
     recommender.create_game_embeddings()
     recommender.train_content_model()
 
-    # 评估模型
+    # Evaluate model
     evaluation_results = recommender.evaluate_recommendations(k_values=[5, 10])
     recommender.evaluation_results = evaluation_results
 
-    # 可视化结果
+    # Visualize results
     recommender.visualize_results()
 
-    # 保存模型
+    # Save model
     recommender.save_model('trained_model')
 
-    logger.info("训练流程完成")
+    logger.info("Training pipeline completed")
     return recommender
 
+
+# Now let's modify the compare_recommendation_methods function:
+
+def compare_recommendation_methods(data_path, user_id, top_n=10):
+    """
+    Compare different recommendation methods
+
+    Parameters:
+        data_path (str): Data file path
+        user_id (int): User ID
+        top_n (int): Number of recommendations
+    """
+    logger.info(f"Comparing recommendation methods for user {user_id}...")
+
+    # Initialize recommendation system
+    recommender = SteamRecommender(data_path)
+
+    # Load and process data
+    recommender.load_data()
+    recommender.engineer_features()
+
+    # Train different models
+    recommender.train_knn_model()
+    recommender.train_svd_model()
+    recommender.train_simple_model()
+    recommender.train_sequence_model()
+    recommender.train_content_model()
+
+    # 1. User-based KNN recommendations
+    original_weights = recommender.config.copy()
+    recommender.config['user_knn_weight'] = 1.0
+    recommender.config['item_knn_weight'] = 0.0
+    recommender.config['svd_weight'] = 0.0
+    recommender.config['sequence_weight'] = 0.0
+    recommender.config['content_weight'] = 0.0
+    user_knn_recommendations = recommender.generate_recommendations(user_id, top_n)
+
+    # 2. Item-based KNN recommendations
+    recommender.config['user_knn_weight'] = 0.0
+    recommender.config['item_knn_weight'] = 1.0
+    recommender.config['svd_weight'] = 0.0
+    recommender.config['sequence_weight'] = 0.0
+    recommender.config['content_weight'] = 0.0
+    item_knn_recommendations = recommender.generate_recommendations(user_id, top_n)
+
+    # 3. SVD model recommendations
+    recommender.config['user_knn_weight'] = 0.0
+    recommender.config['item_knn_weight'] = 0.0
+    recommender.config['svd_weight'] = 1.0
+    recommender.config['sequence_weight'] = 0.0
+    recommender.config['content_weight'] = 0.0
+    svd_recommendations = recommender.generate_recommendations(user_id, top_n)
+
+    # 4. Sequence model recommendations
+    recommender.config['user_knn_weight'] = 0.0
+    recommender.config['item_knn_weight'] = 0.0
+    recommender.config['svd_weight'] = 0.0
+    recommender.config['sequence_weight'] = 1.0
+    recommender.config['content_weight'] = 0.0
+    sequence_recommendations = recommender.generate_recommendations(user_id, top_n)
+
+    # 5. Content-based recommendations
+    recommender.config['user_knn_weight'] = 0.0
+    recommender.config['item_knn_weight'] = 0.0
+    recommender.config['svd_weight'] = 0.0
+    recommender.config['sequence_weight'] = 0.0
+    recommender.config['content_weight'] = 1.0
+    content_recommendations = recommender.generate_recommendations(user_id, top_n)
+
+    # 6. Hybrid model recommendations
+    recommender.config = original_weights
+    hybrid_recommendations = recommender.generate_recommendations(user_id, top_n)
+
+    # Get game titles
+    game_titles = {}
+    for game_id in recommender.df['app_id'].unique():
+        title = recommender.df[recommender.df['app_id'] == game_id]['title'].iloc[0]
+        game_titles[game_id] = title
+
+    # Print comparison results
+    methods = [
+        ("User-based KNN", user_knn_recommendations),
+        ("Item-based KNN", item_knn_recommendations),
+        ("SVD Model", svd_recommendations),
+        ("Sequence Model", sequence_recommendations),
+        ("Content Model", content_recommendations),
+        ("Hybrid Model", hybrid_recommendations)
+    ]
+
+    print(f"\nRecommendation comparisons for user {user_id}:")
+    for method_name, recs in methods:
+        print(f"\n{method_name} recommendations:")
+        for i, (game_id, score) in enumerate(recs, 1):
+            title = game_titles.get(game_id, f"Unknown Game (ID: {game_id})")
+            print(f"{i}. {title} - Score: {score:.4f}")
+
+    # Calculate recommendation overlap
+    def jaccard_similarity(list1, list2):
+        set1 = set([game_id for game_id, _ in list1])
+        set2 = set([game_id for game_id, _ in list2])
+        return len(set1.intersection(set2)) / len(set1.union(set2))
+
+    print("\nRecommendation overlap between methods (Jaccard similarity):")
+    for i, (method1, recs1) in enumerate(methods):
+        for j, (method2, recs2) in enumerate(methods):
+            if i < j:
+                similarity = jaccard_similarity(recs1, recs2)
+                print(f"{method1} vs {method2}: {similarity:.2f}")
+
+    # Visualize game type distribution across different methods
+    if 'tags' in recommender.df.columns:
+        method_tags = {}
+
+        for method_name, recs in methods:
+            method_tags[method_name] = []
+            for game_id, _ in recs:
+                game_data = recommender.df[recommender.df['app_id'] == game_id]
+                if not game_data.empty and pd.notna(game_data['tags'].iloc[0]):
+                    tags = [tag.strip() for tag in game_data['tags'].iloc[0].split(',')]
+                    method_tags[method_name].extend(tags)
+
+        # Create tag distribution data
+        tag_data = []
+        for method, tags in method_tags.items():
+            tag_counter = pd.Series(tags).value_counts().head(10)
+            for tag, count in tag_counter.items():
+                tag_data.append({'Method': method, 'Tag': tag, 'Count': count})
+
+        tag_df = pd.DataFrame(tag_data)
+
+        # Plot stacked bar chart
+        plt.figure(figsize=(15, 8))
+        sns.barplot(x='Method', y='Count', hue='Tag', data=tag_df)
+        plt.title('Game Type Distribution Across Different Methods (Top 10 Tags)')
+        plt.xticks(rotation=0)
+        plt.legend(title='Game Tags', bbox_to_anchor=(1.05, 1), loc='upper left')
+        plt.tight_layout()
+        plt.savefig(f'user_{user_id}_recommendation_methods_comparison.png')
+        plt.close()
+
+    logger.info("Method comparison completed")
+    return methods
 
 def run_inference(model_path, user_id=None, top_n=10):
     """
@@ -292,121 +437,6 @@ def analyze_game_popularity(data_path, top_n=20):
     plt.close()
 
     logger.info("游戏流行度分析完成")
-
-
-def compare_recommendation_methods(data_path, user_id, top_n=10):
-    """
-    比较不同推荐方法的结果
-
-    参数:
-        data_path (str): 数据文件路径
-        user_id (int): 用户ID
-        top_n (int): 推荐数量
-    """
-    logger.info(f"比较为用户 {user_id} 的不同推荐方法...")
-
-    # 初始化推荐系统
-    recommender = SteamRecommender(data_path)
-
-    # 加载并处理数据
-    recommender.load_data()
-    recommender.engineer_features()
-
-    # 训练不同的模型
-    recommender.train_lgbm_model()
-    recommender.train_sequence_model()
-    recommender.train_content_model()
-
-    # 1. 仅使用LightGBM的推荐
-    original_weights = recommender.config.copy()
-    recommender.config['lgbm_weight'] = 1.0
-    recommender.config['sequence_weight'] = 0.0
-    recommender.config['content_weight'] = 0.0
-    lgbm_recommendations = recommender.generate_recommendations(user_id, top_n)
-
-    # 2. 仅使用序列模型的推荐
-    recommender.config['lgbm_weight'] = 0.0
-    recommender.config['sequence_weight'] = 1.0
-    recommender.config['content_weight'] = 0.0
-    sequence_recommendations = recommender.generate_recommendations(user_id, top_n)
-
-    # 3. 仅使用内容模型的推荐
-    recommender.config['lgbm_weight'] = 0.0
-    recommender.config['sequence_weight'] = 0.0
-    recommender.config['content_weight'] = 1.0
-    content_recommendations = recommender.generate_recommendations(user_id, top_n)
-
-    # 4. 混合模型的推荐
-    recommender.config = original_weights
-    hybrid_recommendations = recommender.generate_recommendations(user_id, top_n)
-
-    # 获取游戏标题
-    game_titles = {}
-    for game_id in recommender.df['app_id'].unique():
-        title = recommender.df[recommender.df['app_id'] == game_id]['title'].iloc[0]
-        game_titles[game_id] = title
-
-    # 打印比较结果
-    methods = [
-        ("LightGBM", lgbm_recommendations),
-        ("序列模型", sequence_recommendations),
-        ("内容模型", content_recommendations),
-        ("混合模型", hybrid_recommendations)
-    ]
-
-    print(f"\n为用户 {user_id} 的不同推荐方法比较:")
-    for method_name, recs in methods:
-        print(f"\n{method_name} 推荐:")
-        for i, (game_id, score) in enumerate(recs, 1):
-            title = game_titles.get(game_id, f"未知游戏 (ID: {game_id})")
-            print(f"{i}. {title} - 得分: {score:.4f}")
-
-    # 计算推荐重叠度
-    def jaccard_similarity(list1, list2):
-        set1 = set([game_id for game_id, _ in list1])
-        set2 = set([game_id for game_id, _ in list2])
-        return len(set1.intersection(set2)) / len(set1.union(set2))
-
-    print("\n不同方法之间的推荐重叠度 (Jaccard相似度):")
-    for i, (method1, recs1) in enumerate(methods):
-        for j, (method2, recs2) in enumerate(methods):
-            if i < j:
-                similarity = jaccard_similarity(recs1, recs2)
-                print(f"{method1} vs {method2}: {similarity:.2f}")
-
-    # 可视化不同方法的游戏类型分布
-    if 'tags' in recommender.df.columns:
-        method_tags = {}
-
-        for method_name, recs in methods:
-            method_tags[method_name] = []
-            for game_id, _ in recs:
-                game_data = recommender.df[recommender.df['app_id'] == game_id]
-                if not game_data.empty and pd.notna(game_data['tags'].iloc[0]):
-                    tags = [tag.strip() for tag in game_data['tags'].iloc[0].split(',')]
-                    method_tags[method_name].extend(tags)
-
-        # 创建标签分布数据
-        tag_data = []
-        for method, tags in method_tags.items():
-            tag_counter = pd.Series(tags).value_counts().head(10)
-            for tag, count in tag_counter.items():
-                tag_data.append({'方法': method, '标签': tag, '数量': count})
-
-        tag_df = pd.DataFrame(tag_data)
-
-        # 绘制堆叠条形图
-        plt.figure(figsize=(15, 8))
-        sns.barplot(x='方法', y='数量', hue='标签', data=tag_df)
-        plt.title('不同推荐方法的游戏类型分布 (前10个标签)')
-        plt.xticks(rotation=0)
-        plt.legend(title='游戏标签', bbox_to_anchor=(1.05, 1), loc='upper left')
-        plt.tight_layout()
-        plt.savefig(f'user_{user_id}_recommendation_methods_comparison.png')
-        plt.close()
-
-    logger.info("推荐方法比较完成")
-    return methods
 
 
 def analyze_game_similarity(data_path, game_id, n=10):
@@ -721,98 +751,129 @@ def time_based_recommendation_analysis(data_path, user_id):
     logger.info("时间序列推荐分析完成")
 
 
+# File: src/steam-recommender-example.py
+# Update the optimize_recommender function
+
 def optimize_recommender(data_path):
     """
-    优化推荐器超参数
+    Optimize recommender hyperparameters
 
-    参数:
-        data_path (str): 数据文件路径
+    Parameters:
+        data_path (str): Data file path
     """
-    logger.info("开始优化推荐器超参数...")
+    logger.info("Starting recommender hyperparameter optimization...")
 
-    # 读取数据
+    # Read data
     df = pd.read_csv(data_path)
 
-    # 设定要测试的参数
+    # Define configurations to test
     test_configs = [
-        # 基线配置
+        # Baseline configuration
         {
-            'lgbm_params': {'learning_rate': 0.05, 'num_leaves': 31, 'max_depth': -1},
-            'lgbm_weight': 0.4,
-            'sequence_weight': 0.3,
-            'content_weight': 0.3
+            'user_knn_weight': 0.25,
+            'item_knn_weight': 0.25,
+            'svd_weight': 0.2,
+            'sequence_weight': 0.15,
+            'content_weight': 0.15
         },
-        # 偏向LightGBM
+        # User KNN heavy
         {
-            'lgbm_params': {'learning_rate': 0.05, 'num_leaves': 31, 'max_depth': -1},
-            'lgbm_weight': 0.6,
-            'sequence_weight': 0.2,
-            'content_weight': 0.2
+            'user_knn_weight': 0.5,
+            'item_knn_weight': 0.2,
+            'svd_weight': 0.1,
+            'sequence_weight': 0.1,
+            'content_weight': 0.1
         },
-        # 偏向序列模型
+        # Item KNN heavy
         {
-            'lgbm_params': {'learning_rate': 0.05, 'num_leaves': 31, 'max_depth': -1},
-            'lgbm_weight': 0.2,
-            'sequence_weight': 0.6,
-            'content_weight': 0.2
+            'user_knn_weight': 0.2,
+            'item_knn_weight': 0.5,
+            'svd_weight': 0.1,
+            'sequence_weight': 0.1,
+            'content_weight': 0.1
         },
-        # 偏向内容模型
+        # SVD heavy
         {
-            'lgbm_params': {'learning_rate': 0.05, 'num_leaves': 31, 'max_depth': -1},
-            'lgbm_weight': 0.2,
-            'sequence_weight': 0.2,
-            'content_weight': 0.6
+            'user_knn_weight': 0.15,
+            'item_knn_weight': 0.15,
+            'svd_weight': 0.4,
+            'sequence_weight': 0.15,
+            'content_weight': 0.15
         },
-        # 调整LightGBM参数1
+        # Sequence heavy
         {
-            'lgbm_params': {'learning_rate': 0.1, 'num_leaves': 63, 'max_depth': 10},
-            'lgbm_weight': 0.4,
-            'sequence_weight': 0.3,
-            'content_weight': 0.3
+            'user_knn_weight': 0.15,
+            'item_knn_weight': 0.15,
+            'svd_weight': 0.15,
+            'sequence_weight': 0.4,
+            'content_weight': 0.15
         },
-        # 调整LightGBM参数2
+        # Content heavy
         {
-            'lgbm_params': {'learning_rate': 0.01, 'num_leaves': 15, 'max_depth': 5},
-            'lgbm_weight': 0.4,
-            'sequence_weight': 0.3,
-            'content_weight': 0.3
+            'user_knn_weight': 0.15,
+            'item_knn_weight': 0.15,
+            'svd_weight': 0.15,
+            'sequence_weight': 0.15,
+            'content_weight': 0.4
+        },
+        # KNN only
+        {
+            'user_knn_weight': 0.5,
+            'item_knn_weight': 0.5,
+            'svd_weight': 0.0,
+            'sequence_weight': 0.0,
+            'content_weight': 0.0
+        },
+        # CF only (KNN + SVD)
+        {
+            'user_knn_weight': 0.33,
+            'item_knn_weight': 0.33,
+            'svd_weight': 0.34,
+            'sequence_weight': 0.0,
+            'content_weight': 0.0
         }
     ]
 
-    # 初始化结果存储
+    # Initialize results storage
     results = []
 
-    # 对每个配置进行评估
+    # Evaluate each configuration
     for i, config in enumerate(test_configs):
-        logger.info(f"测试配置 {i + 1}/{len(test_configs)}")
+        logger.info(f"Testing configuration {i + 1}/{len(test_configs)}")
 
-        # 创建推荐系统实例
+        # Create recommendation system instance
         recommender = SteamRecommender(data_path, config)
 
-        # 执行训练流程
+        # Execute training pipeline
         recommender.load_data()
         recommender.engineer_features()
-        recommender.train_lgbm_model()
+        recommender.train_knn_model()
+        recommender.train_svd_model()
+        recommender.train_simple_model()
         recommender.train_sequence_model()
         recommender.train_content_model()
 
-        # 评估性能
+        # Evaluate performance
         metrics = recommender.evaluate_recommendations(k_values=[5, 10])
 
-        # 存储结果
-        config_name = f"配置{i + 1}"
+        # Store results
+        config_name = f"Config {i+1}"
         if i == 0:
-            config_name += " (基线)"
+            config_name += " (Baseline)"
         elif i == 1:
-            config_name += " (偏向LightGBM)"
+            config_name += " (User KNN heavy)"
         elif i == 2:
-            config_name += " (偏向序列模型)"
+            config_name += " (Item KNN heavy)"
         elif i == 3:
-            config_name += " (偏向内容模型)"
+            config_name += " (SVD heavy)"
         elif i == 4:
-            config_name += " (调整LightGBM-1)"
+            config_name += " (Sequence heavy)"
         elif i == 5:
-            config_name += " (调整LightGBM-2)"
+            config_name += " (Content heavy)"
+        elif i == 6:
+            config_name += " (KNN only)"
+        elif i == 7:
+            config_name += " (CF only)"
 
         results.append({
             'config_name': config_name,
@@ -820,8 +881,8 @@ def optimize_recommender(data_path):
             'metrics': metrics
         })
 
-    # 比较结果
-    print("\n超参数优化结果比较:")
+    # Compare results
+    print("\nHyperparameter optimization results:")
     for result in results:
         print(f"\n{result['config_name']}:")
         metrics = result['metrics']
@@ -831,8 +892,8 @@ def optimize_recommender(data_path):
         print(f"Diversity@5: {metrics['diversity'][5]:.4f}, Diversity@10: {metrics['diversity'][10]:.4f}")
         print(f"Coverage: {metrics['coverage']:.4f}")
 
-    # 可视化比较
-    # 准备可视化数据
+    # Visualization
+    # Prepare visualization data
     vis_data = []
     for result in results:
         config_name = result['config_name']
@@ -854,7 +915,7 @@ def optimize_recommender(data_path):
 
     vis_df = pd.DataFrame(vis_data)
 
-    # 绘制性能比较图
+    # Plot performance comparison
     plt.figure(figsize=(15, 10))
 
     metrics_to_plot = ['Precision@5', 'Precision@10', 'Recall@5', 'Recall@10', 'NDCG@5', 'NDCG@10']
@@ -866,7 +927,7 @@ def optimize_recommender(data_path):
         plt.xticks(rotation=45, ha='right')
         plt.ylim(0, data['Value'].max() * 1.2)
 
-        # 在柱状图上显示数值
+        # Show values on bars
         for j, v in enumerate(data['Value']):
             plt.text(j, v + 0.01, f"{v:.3f}", ha='center')
 
@@ -874,7 +935,7 @@ def optimize_recommender(data_path):
     plt.savefig('recommender_optimization_comparison.png')
     plt.close()
 
-    # 找出最佳配置
+    # Find best configurations
     best_configs = {}
     for metric in ['precision', 'recall', 'ndcg', 'diversity']:
         for k in [5, 10]:
@@ -886,11 +947,11 @@ def optimize_recommender(data_path):
     best_coverage_idx = vis_df[vis_df['Metric'] == 'Coverage']['Value'].idxmax()
     best_configs['Coverage'] = vis_df.loc[best_coverage_idx, 'Config']
 
-    print("\n各指标的最佳配置:")
+    print("\nBest configuration per metric:")
     for metric, config in best_configs.items():
         print(f"{metric}: {config}")
 
-    logger.info("超参数优化完成")
+    logger.info("Hyperparameter optimization completed")
     return results
 
 

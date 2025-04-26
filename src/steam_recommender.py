@@ -3,48 +3,27 @@
 
 """
 Steam游戏推荐系统核心模块
-作者: Claude
 日期: 2025-04-24
 描述: 基于LightGBM和序列行为的Steam游戏推荐系统
 """
-
-import pandas as pd
+from sklearn.neighbors import NearestNeighbors
+from sklearn.metrics.pairwise import cosine_similarity
+from scipy.sparse import csr_matrix
+from sklearn.decomposition import TruncatedSVD
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-from datetime import datetime
-import re
+import pandas as pd
+import torch
+import torch.nn as nn
+import torch.optim as optim
 from collections import defaultdict, Counter
 import pickle
 import warnings
 import logging
-from tqdm import tqdm
 import os
-import lightgbm as lgb
-from sklearn.model_selection import train_test_split, GroupKFold, TimeSeriesSplit
-from sklearn.metrics import roc_auc_score, precision_score, recall_score, ndcg_score, mean_squared_error
-from sklearn.preprocessing import LabelEncoder, StandardScaler, MinMaxScaler
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.decomposition import TruncatedSVD
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-
-try:
-    from transformers import AutoTokenizer, AutoModel, AutoConfig
-except ImportError:
-    print("transformers库未安装，一些高级特征可能无法使用")
-try:
-    from gensim.models import Word2Vec
-except ImportError:
-    print("gensim库未安装，Word2Vec特征将不可用")
-try:
-    import nltk
-    from nltk.tokenize import word_tokenize
-    from nltk.corpus import stopwords
-except ImportError:
-    print("nltk库未安装，文本处理功能将受限")
 import random
 import gc
 import json
@@ -69,6 +48,424 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# File: src/steam_recommender.py
+# Core modifications for Steam Recommender
+
+# New simple recommendation model class to replace LightGBM
+class SimpleRecommenderModel:
+    """A simple model to replace LightGBM for binary recommendation tasks"""
+
+    def __init__(self, classifier='logistic'):
+        """
+        Initialize the simple recommender model
+
+        Parameters:
+            classifier (str): Type of classifier to use ('logistic', 'svm', etc.)
+        """
+        self.classifier_type = classifier
+        self.model = None
+        self.feature_names = None
+        self.scaler = StandardScaler()
+
+    def fit(self, X, y, categorical_features=None):
+        """Train the model"""
+        # Store feature names
+        if isinstance(X, pd.DataFrame):
+            self.feature_names = X.columns.tolist()
+            X = X.values
+
+        # Fit the scaler
+        X_scaled = self.scaler.fit_transform(X)
+
+        # Create and train the model
+        if self.classifier_type == 'logistic':
+            self.model = LogisticRegression(max_iter=1000, random_state=42, n_jobs=-1)
+        else:
+            # Default to logistic regression
+            self.model = LogisticRegression(max_iter=1000, random_state=42, n_jobs=-1)
+
+        self.model.fit(X_scaled, y)
+        return self
+
+    def predict(self, X):
+        """Predict probabilities"""
+        if isinstance(X, pd.DataFrame):
+            if self.feature_names:
+                # Ensure columns match
+                X = X[self.feature_names]
+            X = X.values
+
+        # Handle 2D array shape for a single sample
+        if len(X.shape) == 1:
+            X = X.reshape(1, -1)
+
+        X_scaled = self.scaler.transform(X)
+        return self.model.predict_proba(X_scaled)[:, 1]
+
+    def feature_importance(self, importance_type='weight'):
+        """Get feature importance, mimicking LightGBM API"""
+        if self.model is None or self.feature_names is None:
+            return []
+
+        if hasattr(self.model, 'coef_'):
+            # For linear models, use coefficients as feature importance
+            importances = np.abs(self.model.coef_[0])
+            return importances
+
+        # Default to equal importance if model doesn't expose coefficients
+        return np.ones(len(self.feature_names))
+
+
+# SVD model for collaborative filtering
+class SVDModel:
+    """SVD-based collaborative filtering model"""
+
+    def __init__(self, n_components=50):
+        """
+        Initialize the SVD model
+
+        Parameters:
+            n_components (int): Number of latent factors
+        """
+        self.n_components = n_components
+        self.svd = TruncatedSVD(n_components=n_components, random_state=42)
+        self.user_factors = None
+        self.item_factors = None
+        self.user_map = {}
+        self.item_map = {}
+        self.global_mean = 0
+
+    def fit(self, user_item_matrix):
+        """Fit the SVD model to a user-item matrix"""
+        # Store mapping from user/item IDs to matrix indices
+        self.user_map = {user: i for i, user in enumerate(user_item_matrix.index)}
+        self.item_map = {item: i for i, item in enumerate(user_item_matrix.columns)}
+
+        # Calculate global mean rating
+        self.global_mean = user_item_matrix.values.mean()
+
+        # Center the data
+        centered_matrix = user_item_matrix.values - self.global_mean
+
+        # Fit SVD
+        self.svd.fit(centered_matrix)
+
+        # Get latent factors
+        self.item_factors = self.svd.components_.T
+        self.user_factors = centered_matrix @ self.item_factors / np.sqrt(self.svd.singular_values_)
+
+        return self
+
+    def predict(self, user_id, item_id):
+        """Predict rating for a user-item pair"""
+        if user_id not in self.user_map or item_id not in self.item_map:
+            return self.global_mean
+
+        user_idx = self.user_map[user_id]
+        item_idx = self.item_map[item_id]
+
+        user_vector = self.user_factors[user_idx]
+        item_vector = self.item_factors[item_idx]
+
+        # Prediction = global mean + user-item interaction
+        prediction = self.global_mean + np.dot(user_vector, item_vector)
+
+        # Normalize to 0-1 range
+        return min(max(prediction / 10, 0), 1)  # Assuming ratings are 0-10
+
+
+# Methods to add to the SteamRecommender class
+
+def train_svd_model(self):
+    """Train SVD model for collaborative filtering"""
+    logger.info("Training SVD model for collaborative filtering...")
+
+    # Create user-item matrix
+    if not hasattr(self, 'train_df') or self.train_df is None:
+        logger.error("No training data available")
+        return None
+
+    # Determine rating column
+    if 'rating' in self.train_df.columns:
+        rating_col = 'rating'
+    elif 'is_recommended' in self.train_df.columns:
+        # Convert boolean to numeric
+        self.train_df['rating_value'] = self.train_df['is_recommended'].astype(int) * 10
+        rating_col = 'rating_value'
+    else:
+        # Use hours as rating
+        rating_col = 'hours'
+        # Normalize hours to 0-10 scale to be consistent with ratings
+        max_hours = self.train_df['hours'].max()
+        if max_hours > 0:
+            self.train_df['rating_value'] = self.train_df['hours'] * 10 / max_hours
+            rating_col = 'rating_value'
+
+    # Create user-item matrix
+    user_item_matrix = pd.pivot_table(
+        self.train_df,
+        values=rating_col,
+        index='user_id',
+        columns='app_id',
+        aggfunc='mean',
+        fill_value=0
+    )
+
+    # Train SVD model
+    self.svd_model = SVDModel(n_components=min(50, min(user_item_matrix.shape) - 1))
+    self.svd_model.fit(user_item_matrix)
+
+    logger.info("SVD model training completed")
+    return self.svd_model
+
+
+def predict_svd_score(self, user_id, game_id):
+    """Predict rating using SVD model"""
+    if not hasattr(self, 'svd_model') or self.svd_model is None:
+        return 0.5
+
+    try:
+        return self.svd_model.predict(user_id, game_id)
+    except Exception as e:
+        logger.error(f"Error in SVD prediction: {str(e)}")
+        return 0.5
+
+
+def train_simple_model(self):
+    """Train a simple classification model instead of LightGBM"""
+    logger.info("Training simple recommendation model...")
+
+    # Check if we have training data
+    if not hasattr(self, 'train_df') or self.train_df is None:
+        logger.error("No training data available")
+        return None
+
+    # Prepare features and target
+    target_col = 'is_recommended'
+    id_cols = ['user_id', 'app_id', 'date', 'review_id', 'prev_apps', 'prev_ratings', 'prev_hours']
+    categorical_cols = [col for col in self.train_df.columns if col.endswith('_encoded')]
+
+    # Remove non-feature columns
+    exclude_cols = id_cols + [target_col, 'tags', 'description']
+
+    # Select numerical and boolean features
+    feature_cols = []
+    for col in self.train_df.columns:
+        if col in exclude_cols or (hasattr(self.train_df[col].iloc[0], '__iter__') and
+                                   not isinstance(self.train_df[col].iloc[0], (str, bytes))):
+            continue
+        if self.train_df[col].dtype in [np.int64, np.float64, np.bool_]:
+            feature_cols.append(col)
+
+    # Filter out potential leakage features
+    leakage_features = [
+        'rating_new',
+        'recommended_count_x', 'recommended_count_y',
+        'recommendation_ratio_x', 'recommendation_ratio_y',
+        'is_recommended_value', 'is_recommended_sum', 'pref_match'
+    ]
+
+    safe_feature_cols = [col for col in feature_cols if col not in leakage_features]
+    logger.info(f"Using {len(safe_feature_cols)} features for simple model")
+
+    # Prepare data
+    X_train = self.train_df[safe_feature_cols]
+    y_train = self.train_df[target_col].astype(int)
+
+    # Train the model
+    self.simple_model = SimpleRecommenderModel(classifier='logistic')
+    self.simple_model.fit(X_train, y_train)
+
+    # Get feature importance
+    self.feature_importance = pd.DataFrame({
+        'Feature': safe_feature_cols,
+        'Importance': self.simple_model.feature_importance()
+    }).sort_values(by='Importance', ascending=False)
+
+    logger.info("Simple recommendation model training completed")
+    return self.simple_model
+
+
+def predict_simple_model_score(self, user_id, game_id):
+    """Predict using simple model"""
+    if not hasattr(self, 'simple_model') or self.simple_model is None:
+        return 0.5
+
+    try:
+        # Extract features for prediction
+        features = self.extract_prediction_features(user_id, game_id)
+
+        # Make prediction
+        return self.simple_model.predict(features)[0]
+    except Exception as e:
+        logger.error(f"Error in simple model prediction: {str(e)}")
+        return 0.5
+
+
+def predict_score(self, user_id, game_id):
+    """Predict user's preference score for a game (hybrid approach)"""
+    # Use cache if available
+    cache_key = f"{user_id}_{game_id}"
+    if cache_key in self.score_cache:
+        return self.score_cache[cache_key]
+
+    try:
+        # Get scores from different models
+        user_knn_score = self.predict_user_knn_score(user_id, game_id)
+        item_knn_score = self.predict_item_knn_score(user_id, game_id)
+        svd_score = self.predict_svd_score(user_id, game_id)
+        content_score = self.predict_content_score(user_id, game_id)
+        sequence_score = self.predict_sequence_score(user_id, game_id)
+
+        # New weights for the hybrid model
+        weights = {
+            'user_knn': 0.25,
+            'item_knn': 0.25,
+            'svd': 0.2,
+            'content': 0.15,
+            'sequence': 0.15
+        }
+
+        # Calculate weighted average
+        final_score = (
+                weights['user_knn'] * user_knn_score +
+                weights['item_knn'] * item_knn_score +
+                weights['svd'] * svd_score +
+                weights['content'] * content_score +
+                weights['sequence'] * sequence_score
+        )
+
+        # Cache and return result
+        self.score_cache[cache_key] = final_score
+        return final_score
+    except Exception as e:
+        logger.error(f"Error predicting score: {str(e)}")
+        return 0.5
+
+
+def update_simple_model(self, new_data_df):
+    """Incrementally update the simple model with new data"""
+    logger.info("Incrementally updating simple model...")
+
+    if not hasattr(self, 'simple_model') or self.simple_model is None:
+        logger.warning("Simple model doesn't exist, will train from scratch")
+        self.train_simple_model()
+        return
+
+    try:
+        # Update with new data
+        # Merge new data into existing data
+        current_df = self.df.copy() if hasattr(self, 'df') and self.df is not None else pd.DataFrame()
+
+        # Add new data
+        for idx, row in new_data_df.iterrows():
+            user_id = row['user_id']
+            app_id = row['app_id']
+
+            # Check if interaction exists
+            mask = (current_df['user_id'] == user_id) & (current_df['app_id'] == app_id)
+            if sum(mask) > 0:
+                # Update existing row
+                for col in new_data_df.columns:
+                    if col in current_df.columns:
+                        current_df.loc[mask, col] = row[col]
+            else:
+                # Add new row
+                current_df = pd.concat([current_df, pd.DataFrame([row])])
+
+        # Update df
+        self.df = current_df
+
+        # Re-engineer features
+        self.engineer_features()
+
+        # Retrain the model
+        self.train_simple_model()
+
+    except Exception as e:
+        logger.error(f"Error updating simple model: {str(e)}")
+
+
+def update_svd_model(self, new_data_df):
+    """Incrementally update the SVD model with new data"""
+    logger.info("Incrementally updating SVD model...")
+
+    if not hasattr(self, 'svd_model') or self.svd_model is None:
+        logger.warning("SVD model doesn't exist, will train from scratch")
+        self.train_svd_model()
+        return
+
+    try:
+        # For SVD, it's usually more effective to retrain from scratch
+        # Merge new data
+        current_df = self.df.copy() if hasattr(self, 'df') and self.df is not None else pd.DataFrame()
+
+        # Add new data
+        for idx, row in new_data_df.iterrows():
+            user_id = row['user_id']
+            app_id = row['app_id']
+
+            # Check if interaction exists
+            mask = (current_df['user_id'] == user_id) & (current_df['app_id'] == app_id)
+            if sum(mask) > 0:
+                # Update existing row
+                for col in new_data_df.columns:
+                    if col in current_df.columns:
+                        current_df.loc[mask, col] = row[col]
+            else:
+                # Add new row
+                current_df = pd.concat([current_df, pd.DataFrame([row])])
+
+        # Update df
+        self.df = current_df
+
+        # Re-train SVD model
+        self.train_svd_model()
+
+    except Exception as e:
+        logger.error(f"Error updating SVD model: {str(e)}")
+
+
+def incremental_update(self, interactions_df, games_df=None, users_df=None):
+    """Perform incremental update of all models"""
+    logger.info("Starting comprehensive incremental update...")
+
+    try:
+        # Update KNN model
+        if len(interactions_df) > 0:
+            self.update_knn_model(interactions_df)
+
+        # Update SVD model
+        if len(interactions_df) > 0:
+            self.update_svd_model(interactions_df)
+
+        # Update simple model
+        if len(interactions_df) > 0:
+            self.update_simple_model(interactions_df)
+
+        # Update sequence model
+        if len(interactions_df) > 0 and hasattr(self, 'update_sequence_model'):
+            self.update_sequence_model(interactions_df)
+
+        # Update content model
+        if games_df is not None and len(games_df) > 0 and hasattr(self, 'update_content_model'):
+            self.update_content_model(games_df)
+
+        # Update game embeddings
+        if hasattr(self, 'create_game_embeddings'):
+            self.create_game_embeddings()
+
+        # Clear caches
+        self.recommendation_cache = {}
+        self.score_cache = {}
+        self.feature_cache = {}
+
+        logger.info("Incremental update completed")
+
+    except Exception as e:
+        logger.error(f"Error in incremental update: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
 
 class SteamRecommender:
     """Steam游戏推荐系统的主类，整合了数据处理、特征工程、模型训练和评估等功能"""
@@ -269,872 +666,6 @@ class SteamRecommender:
             logger.error(traceback.format_exc())
             return False
 
-    def engineer_features(self):
-        """优化的特征工程函数"""
-        logger.info("开始特征工程...")
-
-        # 只在样本数据上进行特征工程
-        self._add_user_features()
-        self._add_game_features()
-        self._add_interaction_features()
-        self._simplified_sequence_features()
-
-        # 填充可能的缺失值
-        self.train_df.fillna(0, inplace=True)
-        self.test_df.fillna(0, inplace=True)
-
-        # 使用 LabelEncoder 进行编码
-        cat_features = ['app_id', 'user_id']
-        for feat in cat_features:
-            if feat in self.train_df.columns:
-                self.label_encoders[feat] = LabelEncoder()
-                self.train_df[f'{feat}_encoded'] = self.label_encoders[feat].fit_transform(self.train_df[feat])
-
-                # 安全处理测试集中可能出现的新值
-                test_values = self.test_df[feat].values
-                known_values = set(self.label_encoders[feat].classes_)
-                new_values = [val for val in test_values if val not in known_values]
-                if new_values:
-                    logger.warning(f"测试集中发现 {len(new_values)} 个新的 {feat} 值，将被设为-1")
-                    self.test_df[f'{feat}_encoded'] = self.test_df[feat].map(
-                        lambda x: self.label_encoders[feat].transform([x])[0] if x in known_values else -1
-                    )
-                else:
-                    self.test_df[f'{feat}_encoded'] = self.label_encoders[feat].transform(self.test_df[feat])
-
-        logger.info("特征工程完成")
-        return self.train_df, self.test_df
-
-    def _add_user_features(self):
-        """添加用户特征到训练集和测试集"""
-        logger.info("添加用户特征...")
-
-        # 创建用户特征子集
-        user_features = self.user_df[
-            ['user_id', 'game_count', 'total_hours', 'recommended_count', 'recommendation_ratio']]
-
-        # 添加到训练和测试集
-        self.train_df = self.train_df.merge(user_features, on='user_id', how='left')
-        self.test_df = self.test_df.merge(user_features, on='user_id', how='left')
-
-        # 填充缺失值
-        for df in [self.train_df, self.test_df]:
-            if 'game_count' in df.columns:
-                df['game_count'].fillna(0, inplace=True)
-            if 'total_hours' in df.columns:
-                df['total_hours'].fillna(0, inplace=True)
-            if 'recommended_count' in df.columns:
-                df['recommended_count'].fillna(0, inplace=True)
-            if 'recommendation_ratio' in df.columns:
-                df['recommendation_ratio'].fillna(0, inplace=True)
-
-    def _add_game_features(self):
-        """添加游戏特征到训练集和测试集"""
-        logger.info("添加游戏特征...")
-
-        # 创建游戏特征子集
-        game_features = self.game_df[
-            ['app_id', 'user_count', 'total_hours', 'recommended_count', 'recommendation_ratio', 'avg_hours']]
-
-        # 添加到训练和测试集
-        self.train_df = self.train_df.merge(game_features, on='app_id', how='left')
-        self.test_df = self.test_df.merge(game_features, on='app_id', how='left')
-
-        # 添加价格相关特征（如果存在）
-        if 'price_final' in self.train_df.columns and 'price_original' in self.train_df.columns:
-            for df in [self.train_df, self.test_df]:
-                # 填充可能的缺失值
-                df['price_final'].fillna(0, inplace=True)
-                df['price_original'].fillna(0, inplace=True)
-
-                # 创建价格特征
-                df['discount_ratio'] = 1 - (df['price_final'] / df['price_original'].replace(0, 1))
-                df['value_ratio'] = df['price_final'] / (df['hours'] + 1)  # 防止除零
-
-    def _add_interaction_features(self):
-        """添加用户-游戏交互特征"""
-        logger.info("添加交互特征...")
-
-        for df in [self.train_df, self.test_df]:
-            # 非线性小时数特征
-            df['hours_log'] = np.log1p(df['hours'])
-            df['hours_sqrt'] = np.sqrt(df['hours'])
-
-            # 用户-游戏交互特征
-            if 'total_hours' in df.columns and 'game_count' in df.columns:
-                df['hours_vs_avg'] = df['hours'] / (df['total_hours'] / df['game_count'] + 1e-5)
-
-            # 是否是用户游戏时间最长的游戏
-            if 'user_id' in df.columns and 'hours' in df.columns:
-                user_max_hours = df.groupby('user_id')['hours'].transform('max')
-                df['is_max_hours'] = (df['hours'] == user_max_hours).astype(int)
-
-            # 用户偏好与游戏特性匹配特征
-            if 'recommendation_ratio_x' in df.columns and 'recommendation_ratio_y' in df.columns:
-                df['pref_match'] = 1 - abs(df['recommendation_ratio_x'] - df['recommendation_ratio_y'])
-            elif 'recommendation_ratio' in df.columns:
-                # 处理列名可能不同的情况
-                user_ratio_col = None
-                game_ratio_col = None
-
-                # 查找可能的列名
-                for col in df.columns:
-                    if col.startswith('recommendation_ratio'):
-                        if user_ratio_col is None:
-                            user_ratio_col = col
-                        else:
-                            game_ratio_col = col
-                            break
-
-                if user_ratio_col and game_ratio_col:
-                    df['pref_match'] = 1 - abs(df[user_ratio_col] - df[game_ratio_col])
-
-    def _simplified_sequence_features(self):
-        """简化的序列特征创建"""
-        logger.info("创建简化的序列特征...")
-
-        # 限制序列长度
-        max_length = 10  # 降低序列长度
-
-        # 初始化特征列
-        for df in [self.train_df, self.test_df]:
-            df['prev_game_count'] = 0
-            df['avg_prev_rating'] = 0
-            df['last_game_hours'] = 0
-
-            # 确保date列是日期类型
-            if 'date' in df.columns:
-                df['date'] = pd.to_datetime(df['date'])
-
-        # 分批处理，按用户和日期排序处理
-        for user_id in self.train_df['user_id'].unique():
-            # 获取该用户的训练数据
-            user_train = self.train_df[self.train_df['user_id'] == user_id].sort_values('date')
-
-            # 创建简单序列特征
-            for i, idx in enumerate(user_train.index):
-                if i > 0:
-                    # 前几个游戏的数量
-                    self.train_df.at[idx, 'prev_game_count'] = min(i, max_length)
-
-                    # 前几个游戏的平均评分
-                    prev_ratings = user_train.iloc[:i]['is_recommended'].astype(int).values[-max_length:]
-                    if len(prev_ratings) > 0:
-                        self.train_df.at[idx, 'avg_prev_rating'] = np.mean(prev_ratings)
-
-                    # 上一个游戏的时长
-                    self.train_df.at[idx, 'last_game_hours'] = user_train.iloc[i - 1]['hours']
-
-        # 对测试集执行相同的操作
-        for user_id in self.test_df['user_id'].unique():
-            user_data = pd.concat([
-                self.train_df[self.train_df['user_id'] == user_id],
-                self.test_df[self.test_df['user_id'] == user_id]
-            ]).sort_values('date')
-
-            # 找到测试集中该用户的行索引
-            test_indices = self.test_df[self.test_df['user_id'] == user_id].index
-
-            for idx in test_indices:
-                # 找到当前记录在完整历史中的位置
-                current_date = self.test_df.at[idx, 'date']
-                history = user_data[user_data['date'] < current_date]
-
-                # 创建特征
-                self.test_df.at[idx, 'prev_game_count'] = min(len(history), max_length)
-
-                if len(history) > 0:
-                    self.test_df.at[idx, 'avg_prev_rating'] = history['is_recommended'].astype(int).tail(
-                        max_length).mean()
-                    self.test_df.at[idx, 'last_game_hours'] = history.iloc[-1]['hours'] if len(history) > 0 else 0
-
-    def create_user_features(self):
-        """创建用户级特征"""
-        logger.info("创建用户特征...")
-
-        # 按用户分组
-        user_data = self.df.groupby('user_id').agg({
-            'app_id': 'count',  # 用户评论的游戏数
-            'hours': ['mean', 'sum', 'std', 'max'],  # 游戏时间统计
-            'is_recommended': ['mean', 'sum'],  # 推荐率
-            'rating': ['mean', 'std'],  # 评分统计
-            'price_final': ['mean', 'sum'] if 'price_final' in self.df.columns else [],  # 价格统计
-            'discount': ['mean'] if 'discount' in self.df.columns else []  # 折扣统计
-        })
-
-        # 展平多级索引列名
-        user_data.columns = ['_'.join(col).strip() for col in user_data.columns.values]
-        user_data = user_data.reset_index()
-
-        # 添加更多用户特征
-        if 'date' in self.df.columns:
-            # 用户活跃时间跨度
-            user_dates = self.df.groupby('user_id')['date'].agg(['min', 'max'])
-            user_dates['activity_days'] = (user_dates['max'] - user_dates['min']).dt.days
-            user_data = user_data.merge(user_dates[['activity_days']], on='user_id', how='left')
-
-            # 近期活跃度（最近30天的评论数）
-            recent_cutoff = self.df['date'].max() - pd.Timedelta(days=30)
-            recent_reviews = self.df[self.df['date'] >= recent_cutoff]
-            recent_count = recent_reviews.groupby('user_id')['app_id'].count().reset_index()
-            recent_count.columns = ['user_id', 'recent_activity']
-            user_data = user_data.merge(recent_count, on='user_id', how='left')
-            user_data['recent_activity'] = user_data['recent_activity'].fillna(0)
-
-        # 游戏类型偏好
-        if 'tags' in self.df.columns:
-            # 提取每个用户评论过的所有游戏的标签
-            user_tags = {}
-            for _, row in self.df.iterrows():
-                if pd.isna(row['tags']):
-                    continue
-                user_id = row['user_id']
-                if user_id not in user_tags:
-                    user_tags[user_id] = []
-                tags = [tag.strip() for tag in row['tags'].split(',')]
-                user_tags[user_id].extend(tags)
-
-            # 计算每个用户的前3个最常见标签
-            for user_id, tags in user_tags.items():
-                tag_counter = Counter(tags)
-                top_tags = [tag for tag, _ in tag_counter.most_common(3)]
-                for i, tag in enumerate(top_tags):
-                    col_name = f'top_tag_{i + 1}'
-                    if col_name not in user_data.columns:
-                        user_data[col_name] = np.nan
-                    user_data.loc[user_data['user_id'] == user_id, col_name] = tag
-
-        logger.info(f"用户特征创建完成，特征数: {user_data.shape[1]}")
-        return user_data
-
-    def create_game_features(self):
-        """创建游戏级特征"""
-        logger.info("创建游戏特征...")
-
-        # 按游戏分组
-        agg_dict = {
-            'user_id': 'count',  # 评论数
-            'hours': ['mean', 'median', 'std'],  # 游戏时间统计
-            'is_recommended': ['mean', 'sum'],  # 推荐率
-            'rating': 'mean',  # 平均评分
-        }
-
-        # 有些列可能不存在，需要检查
-        if 'helpful' in self.df.columns:
-            agg_dict['helpful'] = ['sum', 'mean']
-        if 'funny' in self.df.columns:
-            agg_dict['funny'] = ['sum', 'mean']
-
-        game_data = self.df.groupby('app_id').agg(agg_dict)
-
-        # 展平多级索引列名
-        game_data.columns = ['_'.join(col).strip() for col in game_data.columns.values]
-        game_data = game_data.reset_index()
-
-        # 添加其他游戏特征
-        if 'positive_ratio' in self.df.columns:
-            positive_ratio = self.df.groupby('app_id')['positive_ratio'].first().reset_index()
-            game_data = game_data.merge(positive_ratio, on='app_id', how='left')
-
-        # 添加价格特征
-        if 'price_final' in self.df.columns and 'price_original' in self.df.columns:
-            price_data = self.df.groupby('app_id').agg({
-                'price_final': 'first',
-                'price_original': 'first',
-                'discount': 'first' if 'discount' in self.df.columns else []
-            }).reset_index()
-            game_data = game_data.merge(price_data, on='app_id', how='left')
-
-            # 计算价格/游戏时间比例（性价比）
-            game_data['value_ratio'] = game_data['price_final'] / game_data['hours_mean'].clip(lower=0.1)
-
-        # 平台支持特征
-        platform_cols = ['win', 'mac', 'linux', 'steam_deck']
-        if all(col in self.df.columns for col in platform_cols):
-            platform_data = self.df.groupby('app_id')[platform_cols].first().reset_index()
-            game_data = game_data.merge(platform_data, on='app_id', how='left')
-
-            # 计算平台支持数量
-            game_data['platform_count'] = game_data[platform_cols].sum(axis=1)
-
-        # 游戏年龄特征
-        if 'date_release' in self.df.columns and 'date' in self.df.columns:
-            # 获取每个游戏的发布日期
-            release_dates = self.df.groupby('app_id')['date_release'].first().reset_index()
-            game_data = game_data.merge(release_dates, on='app_id', how='left')
-
-            # 计算游戏年龄（以天为单位）
-            latest_date = self.df['date'].max()
-            game_data['game_age_days'] = (latest_date - game_data['date_release']).dt.days
-
-        logger.info(f"游戏特征创建完成，特征数: {game_data.shape[1]}")
-        return game_data
-
-    def process_text_features(self):
-        """处理文本特征，包括游戏描述和标签"""
-        logger.info("处理文本特征...")
-
-        # 处理游戏描述
-        if 'description' in self.df.columns:
-            # 填充缺失的描述
-            self.df['description'] = self.df['description'].fillna('')
-
-            # 创建TF-IDF向量
-            self.tfidf_model = TfidfVectorizer(
-                max_features=100,
-                stop_words='english',
-                min_df=2
-            )
-
-            # 按游戏聚合描述（一个游戏只使用一次描述）
-            game_descriptions = self.df.groupby('app_id')['description'].first().reset_index()
-
-            # 生成TF-IDF特征
-            tfidf_matrix = self.tfidf_model.fit_transform(game_descriptions['description'])
-
-            # 使用SVD降维
-            self.tfidf_svd = TruncatedSVD(n_components=min(20, tfidf_matrix.shape[1] - 1))
-            desc_features = self.tfidf_svd.fit_transform(tfidf_matrix)
-
-            # 创建描述特征DataFrame
-            desc_feature_names = [f'desc_svd_{i}' for i in range(desc_features.shape[1])]
-            desc_df = pd.DataFrame(desc_features, columns=desc_feature_names)
-            desc_df['app_id'] = game_descriptions['app_id'].values
-
-            # 合并到训练和测试集
-            self.train_df = self.train_df.merge(desc_df, on='app_id', how='left')
-            self.test_df = self.test_df.merge(desc_df, on='app_id', how='left')
-
-        # 处理标签
-        if 'tags' in self.df.columns:
-            # 按游戏聚合标签
-            game_tags = self.df.groupby('app_id')['tags'].first().reset_index()
-
-            # 用One-Hot编码处理标签
-            # 首先找到所有唯一标签
-            all_tags = set()
-            for tags_str in game_tags['tags'].dropna():
-                tags = [tag.strip() for tag in tags_str.split(',')]
-                all_tags.update(tags)
-
-            # 按标签频率筛选前100个标签
-            tag_counter = Counter()
-            for tags_str in game_tags['tags'].dropna():
-                tags = [tag.strip() for tag in tags_str.split(',')]
-                tag_counter.update(tags)
-
-            top_tags = [tag for tag, _ in tag_counter.most_common(100)]
-
-            # 创建标签特征
-            tag_features = {tag: [] for tag in top_tags}
-            tag_features['app_id'] = []
-
-            for _, row in game_tags.iterrows():
-                tag_features['app_id'].append(row['app_id'])
-
-                if pd.isna(row['tags']):
-                    # 如果标签为空，所有特征都是0
-                    for tag in top_tags:
-                        tag_features[tag].append(0)
-                else:
-                    # 计算标签是否存在
-                    tags = [tag.strip() for tag in row['tags'].split(',')]
-                    for tag in top_tags:
-                        tag_features[tag].append(1 if tag in tags else 0)
-
-            # 创建标签特征DataFrame
-            tag_df = pd.DataFrame(tag_features)
-
-            # 合并到训练和测试集
-            self.train_df = self.train_df.merge(tag_df, on='app_id', how='left')
-            self.test_df = self.test_df.merge(tag_df, on='app_id', how='left')
-
-        logger.info("文本特征处理完成")
-
-    def create_interaction_features(self):
-        """创建用户-游戏交互特征"""
-        logger.info("创建交互特征...")
-
-        # 计算用户-游戏类型交互特征
-        if 'tags' in self.df.columns:
-            # 为每个用户创建标签偏好表
-            user_tag_prefs = defaultdict(Counter)
-
-            for _, row in self.train_df.iterrows():
-                if pd.isna(row['tags']):
-                    continue
-
-                user_id = row['user_id']
-                is_recommended = 1 if row['is_recommended'] else 0
-                tags = [tag.strip() for tag in row['tags'].split(',')]
-
-                # 更新用户对每个标签的偏好
-                for tag in tags:
-                    user_tag_prefs[user_id][tag] += is_recommended
-
-            # 将用户标签偏好添加为特征
-            self.train_df['tag_preference'] = 0
-            self.test_df['tag_preference'] = 0
-
-            for df in [self.train_df, self.test_df]:
-                for idx, row in df.iterrows():
-                    if pd.isna(row['tags']):
-                        continue
-
-                    user_id = row['user_id']
-                    tags = [tag.strip() for tag in row['tags'].split(',')]
-
-                    # 计算该游戏标签的平均用户偏好
-                    if user_id in user_tag_prefs and tags:
-                        tag_prefs = [user_tag_prefs[user_id][tag] for tag in tags]
-                        df.at[idx, 'tag_preference'] = sum(tag_prefs) / len(tags)
-
-        # 创建时间和价格的交互特征
-        for df in [self.train_df, self.test_df]:
-            # 游戏时间与价格的性价比
-            if 'price_final' in df.columns:
-                df['value_for_money'] = df['hours'] / (df['price_final'] + 0.01)
-
-            # 游戏时间与推荐状态的交互
-            df['hours_x_recommended'] = df['hours'] * df['is_recommended'].astype(int)
-
-            # 计算游戏发布时间与评论时间的差距
-            if 'days_since_release' in df.columns:
-                df['early_adoption'] = np.exp(-df['days_since_release'] / 365)  # 时间衰减特征
-
-            # 创建非线性特征
-            df['hours_log'] = np.log1p(df['hours'])
-            df['hours_sqrt'] = np.sqrt(df['hours'])
-
-            # 游戏时间分段特征（捕捉不同游戏时间段的行为模式）
-            hour_bins = [0, 1, 5, 10, 20, 50, 100, np.inf]
-            df['hours_bin'] = pd.cut(df['hours'], bins=hour_bins, labels=False)
-
-            # 针对"长时间游戏但不推荐"的模式创建特征
-            if 'is_recommended' in df.columns:
-                df['long_play_not_recommend'] = ((df['hours'] > df['hours'].median()) &
-                                                 (~df['is_recommended'])).astype(int)
-
-        logger.info("交互特征创建完成")
-
-    def create_sequence_features(self):
-        """创建基于用户序列行为的特征"""
-        logger.info("创建序列特征...")
-
-        if 'date' not in self.df.columns:
-            logger.warning("缺少日期列，无法创建序列特征")
-            return
-
-        # 按用户和时间排序数据
-        self.df = self.df.sort_values(['user_id', 'date'])
-
-        # 为每个用户创建历史序列
-        user_sequences = {}
-        for user_id, group in self.df.groupby('user_id'):
-            # 按时间排序
-            group = group.sort_values('date')
-
-            # 创建游戏ID序列
-            app_id_seq = group['app_id'].tolist()
-
-            # 创建游戏时间序列
-            hours_seq = group['hours'].tolist()
-
-            # 创建推荐状态序列
-            if 'is_recommended' in group.columns:
-                recommended_seq = group['is_recommended'].astype(int).tolist()
-            else:
-                recommended_seq = []
-
-            # 创建评分序列
-            if 'rating' in group.columns:
-                rating_seq = group['rating'].tolist()
-            else:
-                rating_seq = []
-
-            # 创建日期序列
-            date_seq = group['date'].tolist()
-
-            # 存储用户序列
-            user_sequences[user_id] = {
-                'app_id_seq': app_id_seq,
-                'hours_seq': hours_seq,
-                'recommended_seq': recommended_seq,
-                'rating_seq': rating_seq,
-                'date_seq': date_seq
-            }
-
-        # 创建滑动窗口特征
-        max_seq_length = self.config['max_seq_length']
-
-        # 为训练集和测试集创建序列特征
-        for df in [self.train_df, self.test_df]:
-            # 初始化序列特征列
-            df['prev_apps'] = None
-            df['prev_ratings'] = None
-            df['prev_hours'] = None
-            df['avg_prev_rating'] = 0
-            df['avg_prev_hours'] = 0
-            df['prev_apps_count'] = 0
-            df['days_since_last_play'] = -1
-
-            # 对每行数据填充序列特征
-            for idx, row in df.iterrows():
-                user_id = row['user_id']
-                current_date = row['date']
-
-                if user_id not in user_sequences:
-                    continue
-
-                user_seq = user_sequences[user_id]
-
-                # 找到当前交互在序列中的位置
-                try:
-                    current_idx = user_seq['date_seq'].index(current_date)
-                except ValueError:
-                    # 如果找不到完全匹配的日期，找最近的日期
-                    nearest_idx = np.argmin([abs((d - current_date).total_seconds())
-                                             for d in user_seq['date_seq']])
-                    current_idx = nearest_idx
-
-                # 获取前面的序列（不包括当前交互）
-                prev_app_ids = user_seq['app_id_seq'][:current_idx][-max_seq_length:]
-                prev_ratings = user_seq['rating_seq'][:current_idx][-max_seq_length:]
-                prev_hours = user_seq['hours_seq'][:current_idx][-max_seq_length:]
-
-                # 存储序列（作为列表）
-                df.at[idx, 'prev_apps'] = prev_app_ids
-                df.at[idx, 'prev_ratings'] = prev_ratings
-                df.at[idx, 'prev_hours'] = prev_hours
-
-                # 计算聚合统计特征
-                if prev_ratings:
-                    df.at[idx, 'avg_prev_rating'] = sum(prev_ratings) / len(prev_ratings)
-
-                if prev_hours:
-                    df.at[idx, 'avg_prev_hours'] = sum(prev_hours) / len(prev_hours)
-
-                df.at[idx, 'prev_apps_count'] = len(prev_app_ids)
-
-                # 计算自上次游戏以来的天数
-                if current_idx > 0:
-                    last_date = user_seq['date_seq'][current_idx - 1]
-                    df.at[idx, 'days_since_last_play'] = (current_date - last_date).days
-
-                # 计算用户当前游戏的排名特征（第几次游玩该游戏）
-                game_id = row['app_id']
-                play_count = prev_app_ids.count(game_id)
-                df.at[idx, 'play_count'] = play_count
-
-        # 创建时间衰减特征
-        time_decay_factor = self.config['time_decay_factor']
-
-        for df in [self.train_df, self.test_df]:
-            df['time_weighted_rating'] = 0
-
-            for idx, row in df.iterrows():
-                if isinstance(row['prev_ratings'], list) and row['prev_ratings']:
-                    weights = [time_decay_factor ** (len(row['prev_ratings']) - i - 1)
-                               for i in range(len(row['prev_ratings']))]
-                    weighted_sum = sum(r * w for r, w in zip(row['prev_ratings'], weights))
-                    sum_weights = sum(weights)
-                    df.at[idx, 'time_weighted_rating'] = weighted_sum / sum_weights
-
-        logger.info("序列特征创建完成")
-
-    def train_lgbm_model(self):
-        """训练LightGBM模型"""
-        logger.info("开始训练LightGBM模型...")
-
-        # 准备特征和目标变量
-        target_col = 'is_recommended'
-        id_cols = ['user_id', 'app_id', 'date', 'review_id', 'prev_apps', 'prev_ratings', 'prev_hours']
-        categorical_cols = [col for col in self.train_df.columns if col.endswith('_encoded')]
-
-        # 移除不能用作特征的列
-        exclude_cols = id_cols + [target_col, 'tags', 'description']
-
-        # 只选择数值型和布尔型特征
-        feature_cols = []
-        for col in self.train_df.columns:
-            if col in exclude_cols or pd.api.types.is_list_like(self.train_df[col].iloc[0]):
-                continue
-            if self.train_df[col].dtype in [np.int64, np.float64, np.bool_]:
-                feature_cols.append(col)
-            else:
-                # 跳过object和datetime类型
-                logger.info(f"跳过非数值型特征: {col} (类型: {self.train_df[col].dtype})")
-        # 排除高度泄露特征
-        leakage_features = [
-            'rating_new',
-            'recommended_count_x', 'recommended_count_y',
-            'recommendation_ratio_x', 'recommendation_ratio_y',
-            'is_recommended_value', 'is_recommended_sum', 'pref_match'
-        ]
-
-        # 显示被排除的特征
-        excluded_features = [f for f in leakage_features if f in feature_cols]
-        if excluded_features:
-            logger.info(f"排除以下泄露特征: {excluded_features}")
-
-        # 过滤特征列表
-        safe_feature_cols = [col for col in feature_cols if col not in leakage_features]
-        logger.info(f"使用安全特征: {safe_feature_cols}")
-
-        X_train = self.train_df[safe_feature_cols]
-        y_train = self.train_df[target_col].astype(int)
-
-        X_val = self.test_df[safe_feature_cols]
-        y_val = self.test_df[target_col].astype(int)
-
-        logger.info(f"训练特征数量: {len(safe_feature_cols)}")
-        logger.info(f"使用的特征: {safe_feature_cols[:10]}...")
-
-        # 设置分类特征
-        for col in categorical_cols:
-            if col in safe_feature_cols:
-                X_train[col] = X_train[col].astype('category')
-                X_val[col] = X_val[col].astype('category')
-
-        # 创建LightGBM数据集
-        train_data = lgb.Dataset(
-            X_train,
-            label=y_train,
-            categorical_feature=[col for col in categorical_cols if col in safe_feature_cols]
-        )
-
-        val_data = lgb.Dataset(
-            X_val,
-            label=y_val,
-            categorical_feature=[col for col in categorical_cols if col in safe_feature_cols],
-            reference=train_data
-        )
-
-        # 使用更简单的参数配置
-        params = {
-            'objective': 'binary',
-            'metric': 'auc',
-            'boosting_type': 'gbdt',
-            'learning_rate': 0.1,
-            'num_leaves': 31,
-            'max_depth': 6,  # 降低复杂度
-            'min_child_samples': 50,
-            'subsample': 0.6,  # 减少样本比例
-            'colsample_bytree': 0.6,  # 减少特征比例
-            'n_estimators': 200  # 减少迭代次数
-        }
-
-        # 训练模型
-        callbacks = [lgb.early_stopping(50), lgb.log_evaluation(50)]
-
-        self.lgbm_model = lgb.train(
-            params=params,
-            train_set=train_data,
-            valid_sets=[train_data, val_data],
-            valid_names=['train', 'valid'],
-            callbacks=callbacks,
-            num_boost_round=1000
-        )
-
-        # 评估模型
-        lgbm_preds = self.lgbm_model.predict(X_val)
-        auc_score = roc_auc_score(y_val, lgbm_preds)
-        logger.info(f"LightGBM模型验证AUC: {auc_score:.4f}")
-
-        # 特征重要性
-        feature_importance = pd.DataFrame({
-            'Feature': safe_feature_cols,
-            'Importance': self.lgbm_model.feature_importance(importance_type='gain')
-        }).sort_values(by='Importance', ascending=False)
-
-        logger.info("前10个重要特征:")
-        for idx, row in feature_importance.head(10).iterrows():
-            logger.info(f"{row['Feature']}: {row['Importance']}")
-
-        self.feature_importance = feature_importance
-        return self.lgbm_model
-
-    def train_sequence_model(self):
-        """训练简化的序列模型"""
-        logger.info("开始训练序列模型...")
-
-        # 检查必要的序列特征是否存在
-        if 'prev_game_count' not in self.train_df.columns:
-            logger.warning("没有找到序列特征，跳过序列模型训练")
-            return None
-
-        # 使用简化的序列特征代替完整的序列历史
-        # 用于更高效地处理大型数据集
-
-        # 定义序列模型
-        class SimpleSequenceModel(nn.Module):
-            def __init__(self, input_dim, hidden_dim=64, dropout=0.2):
-                super().__init__()
-                self.layers = nn.Sequential(
-                    nn.Linear(input_dim, hidden_dim),
-                    nn.ReLU(),
-                    nn.Dropout(dropout),
-                    nn.Linear(hidden_dim, hidden_dim // 2),
-                    nn.ReLU(),
-                    nn.Dropout(dropout),
-                    nn.Linear(hidden_dim // 2, 1),
-                    nn.Sigmoid()
-                )
-
-            def forward(self, x):
-                return self.layers(x).squeeze()
-
-        # 选择序列相关特征
-        seq_features = [
-            'prev_game_count',
-            'avg_prev_rating',
-            'last_game_hours'
-        ]
-
-        # 添加其他可能有用的特征
-        additional_features = [
-            'hours',
-            'hours_log',
-            'recommendation_ratio',
-            'total_hours',
-            'game_count'
-        ]
-
-        # 最终使用的特征列表
-        feature_cols = []
-        for col in seq_features + additional_features:
-            if col in self.train_df.columns:
-                feature_cols.append(col)
-
-        if len(feature_cols) == 0:
-            logger.warning("没有可用的特征用于序列模型训练")
-            return None
-
-        logger.info(f"使用特征: {feature_cols}")
-
-        # 准备训练数据
-        X_train = self.train_df[feature_cols].values
-        y_train = self.train_df['is_recommended'].astype(int).values
-
-        # 转换为PyTorch张量
-        X_train_tensor = torch.FloatTensor(X_train)
-        y_train_tensor = torch.FloatTensor(y_train)
-
-        # 创建数据集和数据加载器
-        train_dataset = torch.utils.data.TensorDataset(X_train_tensor, y_train_tensor)
-        train_loader = torch.utils.data.DataLoader(
-            train_dataset,
-            batch_size=64,
-            shuffle=True
-        )
-
-        # 初始化模型
-        input_dim = len(feature_cols)
-        self.sequence_model = SimpleSequenceModel(input_dim).to(self.device)
-
-        # 定义损失函数和优化器
-        criterion = nn.BCELoss()
-        optimizer = optim.Adam(self.sequence_model.parameters(), lr=0.001)
-
-        # 训练模型
-        epochs = 5
-        for epoch in range(epochs):
-            self.sequence_model.train()
-            total_loss = 0
-
-            for inputs, targets in train_loader:
-                inputs, targets = inputs.to(self.device), targets.to(self.device)
-
-                # 前向传播
-                optimizer.zero_grad()
-                outputs = self.sequence_model(inputs)
-
-                # 计算损失
-                loss = criterion(outputs, targets)
-
-                # 反向传播
-                loss.backward()
-                optimizer.step()
-
-                total_loss += loss.item()
-
-            avg_loss = total_loss / len(train_loader)
-            logger.info(f"Epoch {epoch + 1}/{epochs}, Loss: {avg_loss:.4f}")
-
-        # 创建游戏嵌入空间
-        self.game_embeddings = {}
-
-        logger.info("序列模型训练完成")
-        # 保存使用的特征列表，以便在预测时使用
-        self.sequence_feature_columns = feature_cols
-
-        # 记录特征数量
-        logger.info(f"序列模型输入维度: {len(feature_cols)}")
-        self.sequence_feature_length = len(feature_cols)
-
-        return self.sequence_model
-
-    def prepare_sequence_data(self, df):
-        """准备序列模型的训练数据"""
-        sequences = []
-        targets = []
-
-        for _, row in df.iterrows():
-            if not isinstance(row['prev_apps'], list) or len(row['prev_apps']) == 0:
-                continue
-
-            # 获取游戏ID序列（使用编码后的ID）
-            game_seq = []
-            for app_id in row['prev_apps']:
-                if app_id in self.label_encoders['app_id'].classes_:
-                    encoded_id = self.label_encoders['app_id'].transform([app_id])[0]
-                    game_seq.append(encoded_id)
-                else:
-                    # 对于不在训练集中的游戏ID，使用特殊的OOV ID
-                    game_seq.append(len(self.label_encoders['app_id'].classes_))
-
-            sequences.append(game_seq)
-            targets.append(1 if row['is_recommended'] else 0)
-
-        return {
-            'sequences': sequences,
-            'targets': targets
-        }
-
-    def create_game_embeddings(self):
-        """创建游戏嵌入向量 - 简化版本"""
-        logger.info("创建游戏嵌入向量...")
-
-        # 在此实现中，我们不使用传统的嵌入层
-        # 而是基于游戏特征创建简单的嵌入表示
-
-        # 获取所有游戏ID
-        all_games = self.game_df['app_id'].unique()
-
-        # 用于嵌入的特征
-        embed_features = ['user_count', 'recommendation_ratio', 'avg_hours']
-        available_features = [f for f in embed_features if f in self.game_df.columns]
-
-        if not available_features:
-            logger.warning("没有可用的特征来创建游戏嵌入")
-            return {}
-
-        # 标准化特征
-        from sklearn.preprocessing import StandardScaler
-        scaler = StandardScaler()
-
-        # 特征矩阵
-        feature_matrix = self.game_df[available_features].values
-        normalized_features = scaler.fit_transform(feature_matrix)
-
-        # 创建嵌入字典
-        self.game_embeddings = {}
-        for i, game_id in enumerate(self.game_df['app_id']):
-            self.game_embeddings[game_id] = normalized_features[i]
-
-        logger.info(f"创建了 {len(self.game_embeddings)} 个游戏嵌入向量")
-        return self.game_embeddings
-
     def train_content_model(self):
         """训练基于内容的模型（用于处理冷启动问题）"""
         logger.info("开始训练基于内容的模型...")
@@ -1186,73 +717,6 @@ class SteamRecommender:
         logger.info("基于内容的模型训练完成")
         return self.content_similarity
 
-    def generate_recommendations(self, user_id, n=10):
-        """优化的推荐生成函数"""
-        # 使用缓存
-        cache_key = f"{user_id}_{n}"
-        if cache_key in self.recommendation_cache:
-            return self.recommendation_cache[cache_key]
-
-        logger.info(f"为用户 {user_id} 生成 {n} 条推荐...")
-
-        # 对于新用户或找不到的用户，使用热门推荐
-        if user_id not in self.user_df['user_id'].values:
-            logger.warning(f"用户 {user_id} 未在训练或测试数据中找到")
-            return self.get_popular_games(n)
-
-        # 获取用户已经评论过的游戏
-        user_games = set()
-
-        # 从训练集获取
-        user_train_games = self.train_df[self.train_df['user_id'] == user_id]['app_id'].values
-        user_games.update(user_train_games)
-
-        # 从测试集获取
-        user_test_games = self.test_df[self.test_df['user_id'] == user_id]['app_id'].values
-        user_games.update(user_test_games)
-
-        # 从热门游戏中筛选候选集
-        candidate_size = min(50000, len(self.game_df))  # 只考虑最多500款游戏
-        top_games = set(self.game_df.sort_values('user_count', ascending=False)
-                        .head(candidate_size)['app_id'].values)
-        candidate_games = top_games - user_games
-
-        # 如果没有候选游戏，返回热门游戏
-        if not candidate_games:
-            logger.warning(f"用户 {user_id} 没有可推荐的候选游戏")
-            return self.get_popular_games(n)
-
-        # 为每个候选游戏预测得分
-        predictions = []
-        for game_id in candidate_games:
-            score = self.predict_score(user_id, game_id)
-            predictions.append((game_id, score))
-
-        # 在generate_recommendations方法中添加日志
-        logger.info(f"为用户{user_id}生成推荐，候选游戏数:{len(candidate_games)}")
-        logger.info(f"用户特征: {self.user_df[self.user_df['user_id'] == user_id].to_dict()}")
-
-        # 记录前几个预测分数
-        for i, (game_id, score) in enumerate(predictions[:5]):
-            logger.info(f"游戏{game_id}预测分数:{score}")
-
-        # 按分数降序排列
-        recommendations = sorted(predictions, key=lambda x: x[1], reverse=True)[:n]
-
-        logger.info(f"成功为用户 {user_id} 生成了 {len(recommendations)} 条推荐")
-
-        # 缓存结果
-        self.recommendation_cache[cache_key] = recommendations
-
-        for game_id in list(candidate_games)[:10]:  # 仅打印前10个游戏的详情
-            score = self.predict_score(user_id, game_id)
-            lgbm_score = self.lgbm_model.predict([features])[0] if self.lgbm_model else 0.5
-            seq_score = self.predict_sequence_score(user_id, game_id)
-            content_score = self.predict_content_score(user_id, game_id)
-            logger.info(
-                f"游戏{game_id}详细分数 - LGBM:{lgbm_score:.4f}, 序列:{seq_score:.4f}, 内容:{content_score:.4f}, 最终:{score:.4f}")
-
-        return recommendations
 
     def predict_score(self, user_id, game_id):
         """预测用户对游戏的评分（KNN混合方式）"""
@@ -1511,177 +975,16 @@ class SteamRecommender:
             popular_games['app_id'], popular_games['popularity_score']
         )]
 
-    def evaluate_recommendations(self, k_values=[5, 10, 20]):
-        """评估推荐系统性能 - 优化版本"""
-        logger.info("开始评估推荐系统...")
-
-        # 准备测试用户
-        test_users = self.test_df['user_id'].unique()
-
-        # 限制评估用户数以提高效率
-        max_test_users = min(100, len(test_users))
-        test_users = np.random.choice(test_users, max_test_users, replace=False)
-
-        logger.info(f"使用 {len(test_users)} 个测试用户进行评估")
-
-        # 初始化评估指标
-        metrics = {
-            'precision': {k: [] for k in k_values},
-            'recall': {k: [] for k in k_values},
-            'ndcg': {k: [] for k in k_values},
-            'diversity': {k: [] for k in k_values},
-            'coverage': []
-        }
-
-        # 所有推荐的游戏集合（用于计算覆盖率）
-        all_recommended_games = set()
-        all_games = set(self.game_df['app_id'].unique())  # 使用game_df而不是df
-
-        # 评估每个测试用户
-        for user_id in tqdm(test_users, desc="评估用户"):
-            # 获取用户实际喜欢的游戏
-            user_liked_games = set(self.test_df[
-                                       (self.test_df['user_id'] == user_id) &
-                                       (self.test_df['is_recommended'] == True)
-                                       ]['app_id'].values)
-
-            # 如果用户没有喜欢的游戏，跳过
-            if not user_liked_games:
-                continue
-
-            # 生成推荐
-            max_k = max(k_values)
-            recommendations = self.generate_recommendations(user_id, max_k)
-            recommended_games = [game_id for game_id, _ in recommendations]
-
-            # 更新所有推荐的游戏集合
-            all_recommended_games.update(recommended_games)
-
-            # 计算每个K值的指标
-            for k in k_values:
-                top_k_games = recommended_games[:k]
-
-                # 计算精确率
-                hits = len(set(top_k_games) & user_liked_games)
-                precision = hits / k if k > 0 else 0
-                metrics['precision'][k].append(precision)
-
-                # 计算召回率
-                recall = hits / len(user_liked_games) if len(user_liked_games) > 0 else 0
-                metrics['recall'][k].append(recall)
-
-                # 计算NDCG
-                # 创建相关性数组（1表示相关，0表示不相关）
-                relevance = [1 if game in user_liked_games else 0 for game in top_k_games]
-                # 理想情况下的排序
-                ideal_relevance = sorted(relevance, reverse=True)
-
-                if sum(relevance) > 0:
-                    try:
-                        from sklearn.metrics import ndcg_score
-                        ndcg = ndcg_score([ideal_relevance], [relevance])
-                        metrics['ndcg'][k].append(ndcg)
-                    except:
-                        # 如果 ndcg_score 失败，使用自定义计算
-                        logger.warning("使用自定义NDCG计算")
-                        dcg = sum((2 ** rel - 1) / np.log2(i + 2) for i, rel in enumerate(relevance))
-                        idcg = sum((2 ** rel - 1) / np.log2(i + 2) for i, rel in enumerate(ideal_relevance))
-                        ndcg = dcg / idcg if idcg > 0 else 0
-                        metrics['ndcg'][k].append(ndcg)
-
-                # 计算多样性
-                # 使用游戏标签计算推荐列表中游戏的不同类型
-                if 'tags' in self.game_df.columns:  # 使用game_df检查tags列
-                    game_tags = {}
-                    for game_id in top_k_games:
-                        game_row = self.game_df[self.game_df['app_id'] == game_id]
-                        if not game_row.empty and 'tags' in game_row.columns and not pd.isna(game_row['tags'].iloc[0]):
-                            tags = set(tag.strip() for tag in game_row['tags'].iloc[0].split(','))
-                            game_tags[game_id] = tags
-                        else:
-                            game_tags[game_id] = set()
-
-                    # 计算平均两两Jaccard距离
-                    if len(game_tags) >= 2:
-                        diversity_scores = []
-                        for i, (game1, tags1) in enumerate(game_tags.items()):
-                            for game2, tags2 in list(game_tags.items())[i + 1:]:
-                                if tags1 and tags2:  # 只有当两个游戏都有标签时
-                                    jaccard_similarity = len(tags1 & tags2) / len(tags1 | tags2)
-                                    jaccard_distance = 1 - jaccard_similarity
-                                    diversity_scores.append(jaccard_distance)
-
-                        if diversity_scores:
-                            diversity = sum(diversity_scores) / len(diversity_scores)
-                            metrics['diversity'][k].append(diversity)
-
-        # 计算覆盖率
-        coverage = len(all_recommended_games) / len(all_games) if all_games else 0
-        metrics['coverage'] = coverage
-
-        # 计算平均指标
-        results = {}
-        for metric in ['precision', 'recall', 'ndcg', 'diversity']:
-            results[metric] = {k: np.mean(metrics[metric][k]) if metrics[metric][k] else 0 for k in k_values}
-        results['coverage'] = metrics['coverage']
-
-        # 打印结果
-        logger.info("评估结果:")
-        for metric in ['precision', 'recall', 'ndcg', 'diversity']:
-            logger.info(f"{metric.capitalize()}:")
-            for k in k_values:
-                value = results[metric][k]
-                logger.info(f"  @{k}: {value:.4f}")
-        logger.info(f"Coverage: {results['coverage']:.4f}")
-
-        return results
-
-    def visualize_results(self):
-        """可视化模型结果和特征重要性"""
-        if not hasattr(self, 'feature_importance') or self.feature_importance is None:
-            logger.warning("没有可视化的特征重要性")
-            return
-
-        # 绘制特征重要性
-        plt.figure(figsize=(12, 8))
-        top_features = self.feature_importance.head(20)
-        sns.barplot(x='Importance', y='Feature', data=top_features)
-        plt.title('Top 20 Features by Importance')
-        plt.tight_layout()
-        plt.savefig('feature_importance.png')
-        plt.close()
-
-        # 绘制评估指标
-        if hasattr(self, 'evaluation_results'):
-            metrics = ['precision', 'recall', 'ndcg', 'diversity']
-            k_values = sorted(self.evaluation_results['precision'].keys())
-
-            plt.figure(figsize=(15, 10))
-            for i, metric in enumerate(metrics, 1):
-                plt.subplot(2, 2, i)
-                values = [self.evaluation_results[metric][k] for k in k_values]
-                plt.plot(k_values, values, marker='o')
-                plt.title(f'{metric.capitalize()} at different k')
-                plt.xlabel('k')
-                plt.ylabel(metric)
-                plt.grid(True)
-
-            plt.tight_layout()
-            plt.savefig('evaluation_metrics.png')
-            plt.close()
-
-        logger.info("结果可视化完成")
-
     def save_model(self, path='steam_recommender_model'):
-        """保存模型和相关数据"""
-        logger.info(f"保存模型到 {path}...")
+        """Save model and related data"""
+        logger.info(f"Saving model to {path}...")
 
-        # 创建保存目录
+        # Create save directory
         os.makedirs(path, exist_ok=True)
 
-        # 保存KNN模型相关数据
+        # Save KNN model related data
         if hasattr(self, 'user_knn_model') and self.user_knn_model is not None:
-            # 保存索引映射
+            # Save index mappings
             with open(os.path.join(path, 'user_indices.pkl'), 'wb') as f:
                 pickle.dump(self.user_indices, f)
             with open(os.path.join(path, 'app_indices.pkl'), 'wb') as f:
@@ -1691,25 +994,35 @@ class SteamRecommender:
             with open(os.path.join(path, 'reversed_app_indices.pkl'), 'wb') as f:
                 pickle.dump(self.reversed_app_indices, f)
 
-            # 保存用户-游戏矩阵
+            # Save user-game matrix
             if hasattr(self, 'user_game_matrix') and self.user_game_matrix is not None:
                 self.user_game_matrix.to_pickle(os.path.join(path, 'user_game_matrix.pkl'))
 
-            # 保存KNN模型
+            # Save KNN models
             with open(os.path.join(path, 'user_knn_model.pkl'), 'wb') as f:
                 pickle.dump(self.user_knn_model, f)
             with open(os.path.join(path, 'item_knn_model.pkl'), 'wb') as f:
                 pickle.dump(self.item_knn_model, f)
 
-        # 保存序列模型
+        # Save SVD model
+        if hasattr(self, 'svd_model') and self.svd_model is not None:
+            with open(os.path.join(path, 'svd_model.pkl'), 'wb') as f:
+                pickle.dump(self.svd_model, f)
+
+        # Save simple model (replacing LightGBM)
+        if hasattr(self, 'simple_model') and self.simple_model is not None:
+            with open(os.path.join(path, 'simple_model.pkl'), 'wb') as f:
+                pickle.dump(self.simple_model, f)
+
+        # Save sequence model
         if hasattr(self, 'sequence_model') and self.sequence_model is not None:
             torch.save(self.sequence_model.state_dict(), os.path.join(path, 'sequence_model.pt'))
-            # 保存序列特征列表
+            # Save sequence feature columns
             if hasattr(self, 'sequence_feature_columns'):
                 with open(os.path.join(path, 'sequence_features.pkl'), 'wb') as f:
                     pickle.dump(self.sequence_feature_columns, f)
 
-        # 保存编码器和其他组件
+        # Save encoders and other components
         with open(os.path.join(path, 'label_encoders.pkl'), 'wb') as f:
             pickle.dump(self.label_encoders, f)
 
@@ -1733,28 +1046,28 @@ class SteamRecommender:
             with open(os.path.join(path, 'content_similarity.pkl'), 'wb') as f:
                 pickle.dump(self.content_similarity, f)
 
-        # 保存配置
+        # Save configuration
         with open(os.path.join(path, 'config.json'), 'w') as f:
             json.dump(self.config, f, indent=4)
 
-        logger.info(f"模型保存完成")
+        logger.info(f"Model save completed")
 
     def load_model(self, path='steam_recommender_model'):
-        """加载模型和相关数据"""
-        logger.info(f"从 {path} 加载模型...")
+        """Load model and related data"""
+        logger.info(f"Loading model from {path}...")
 
-        # 检查保存目录是否存在
+        # Check if save directory exists
         if not os.path.exists(path):
-            logger.error(f"模型目录 {path} 不存在")
+            logger.error(f"Model directory {path} does not exist")
             return False
 
-        # 加载配置
+        # Load configuration
         config_path = os.path.join(path, 'config.json')
         if os.path.exists(config_path):
             with open(config_path, 'r') as f:
                 self.config = json.load(f)
 
-        # 加载KNN模型相关数据
+        # Load KNN model related data
         user_indices_path = os.path.join(path, 'user_indices.pkl')
         app_indices_path = os.path.join(path, 'app_indices.pkl')
         reversed_user_indices_path = os.path.join(path, 'reversed_user_indices.pkl')
@@ -1763,7 +1076,7 @@ class SteamRecommender:
         user_knn_model_path = os.path.join(path, 'user_knn_model.pkl')
         item_knn_model_path = os.path.join(path, 'item_knn_model.pkl')
 
-        # 加载索引映射
+        # Load index mappings
         if os.path.exists(user_indices_path):
             with open(user_indices_path, 'rb') as f:
                 self.user_indices = pickle.load(f)
@@ -1780,13 +1093,13 @@ class SteamRecommender:
             with open(reversed_app_indices_path, 'rb') as f:
                 self.reversed_app_indices = pickle.load(f)
 
-        # 加载用户-游戏矩阵
+        # Load user-game matrix
         if os.path.exists(user_game_matrix_path):
             self.user_game_matrix = pd.read_pickle(user_game_matrix_path)
-            # 重建稀疏矩阵
+            # Rebuild sparse matrix
             self.user_game_sparse_matrix = csr_matrix(self.user_game_matrix.values)
 
-        # 加载KNN模型
+        # Load KNN models
         if os.path.exists(user_knn_model_path):
             with open(user_knn_model_path, 'rb') as f:
                 self.user_knn_model = pickle.load(f)
@@ -1795,7 +1108,19 @@ class SteamRecommender:
             with open(item_knn_model_path, 'rb') as f:
                 self.item_knn_model = pickle.load(f)
 
-        # 加载编码器和其他组件
+        # Load SVD model
+        svd_model_path = os.path.join(path, 'svd_model.pkl')
+        if os.path.exists(svd_model_path):
+            with open(svd_model_path, 'rb') as f:
+                self.svd_model = pickle.load(f)
+
+        # Load simple model (replacing LightGBM)
+        simple_model_path = os.path.join(path, 'simple_model.pkl')
+        if os.path.exists(simple_model_path):
+            with open(simple_model_path, 'rb') as f:
+                self.simple_model = pickle.load(f)
+
+        # Load encoders and other components
         encoders_path = os.path.join(path, 'label_encoders.pkl')
         if os.path.exists(encoders_path):
             with open(encoders_path, 'rb') as f:
@@ -1826,7 +1151,7 @@ class SteamRecommender:
             with open(similarity_path, 'rb') as f:
                 self.content_similarity = pickle.load(f)
 
-        # 加载序列模型
+        # Load sequence model
         sequence_path = os.path.join(path, 'sequence_model.pt')
         sequence_features_path = os.path.join(path, 'sequence_features.pkl')
 
@@ -1835,11 +1160,11 @@ class SteamRecommender:
                 self.sequence_feature_columns = pickle.load(f)
 
         if os.path.exists(sequence_path):
-            # 需要先初始化模型架构，再加载权重
-            logger.info("序列模型存在但需要手动重建模型架构后再加载权重")
-            # 可以在这里添加序列模型重建逻辑
+            # Need to initialize model architecture before loading weights
+            logger.info("Sequence model weights exist but need to manually rebuild model architecture before loading")
+            # Rebuild logic can be added here if needed
 
-        logger.info(f"模型加载完成")
+        logger.info(f"Model loading completed")
         return True
 
     def get_content_recommendations(self, app_id, top_n=10):
@@ -2161,299 +1486,6 @@ class SteamRecommender:
         except Exception as e:
             logger.error(f"物品KNN预测出错: {str(e)}")
             return 0.5
-
-def update_lgbm_model(self, new_data_df):
-    """
-    增量更新LightGBM模型
-
-    参数:
-        new_data_df (DataFrame): 新的交互数据
-    """
-    logger.info("开始增量更新LightGBM模型...")
-
-    if not hasattr(self, 'lgbm_model') or self.lgbm_model is None:
-        logger.warning("LightGBM模型不存在，将进行完整训练")
-        self.train_lgbm_model()
-        return
-
-    try:
-        # 确保新数据包含必要的列
-        required_cols = ['user_id', 'app_id', 'is_recommended']
-        if not all(col in new_data_df.columns for col in required_cols):
-            logger.error("新数据缺少必要的列，无法执行增量训练")
-            return
-
-        # 合并新数据到现有数据集
-        # 注意：这里假设self.df已经存在
-        if not hasattr(self, 'df') or self.df is None:
-            logger.error("基础数据集不存在，无法执行增量训练")
-            return
-
-        # 复制一份当前数据
-        current_df = self.df.copy()
-
-        # 为新数据添加必要的特征
-        # 这里需要执行与原始特征工程相同的步骤
-        for idx, row in new_data_df.iterrows():
-            user_id = row['user_id']
-            app_id = row['app_id']
-
-            # 检查是否已存在该交互
-            mask = (current_df['user_id'] == user_id) & (current_df['app_id'] == app_id)
-            if sum(mask) > 0:
-                # 更新现有记录
-                for col in new_data_df.columns:
-                    if col in current_df.columns:
-                        current_df.loc[mask, col] = row[col]
-            else:
-                # 添加新记录
-                current_df = pd.concat([current_df, pd.DataFrame([row])])
-
-        # 更新基础数据集
-        self.df = current_df
-
-        # 重新执行特征工程
-        self.engineer_features()
-
-        # 获取训练数据
-        target_col = 'is_recommended'
-        id_cols = ['user_id', 'app_id', 'date', 'review_id', 'prev_apps', 'prev_ratings', 'prev_hours']
-        categorical_cols = [col for col in self.train_df.columns if col.endswith('_encoded')]
-
-        # 移除不能用作特征的列
-        exclude_cols = id_cols + [target_col, 'tags', 'description']
-
-        # 只选择数值型和布尔型特征
-        feature_cols = []
-        for col in self.train_df.columns:
-            if col in exclude_cols or pd.api.types.is_list_like(self.train_df[col].iloc[0]):
-                continue
-            if self.train_df[col].dtype in [np.int64, np.float64, np.bool_]:
-                feature_cols.append(col)
-
-        X_train = self.train_df[feature_cols]
-        y_train = self.train_df[target_col].astype(int)
-
-        X_val = self.test_df[feature_cols]
-        y_val = self.test_df[target_col].astype(int)
-
-        # 设置分类特征
-        for col in categorical_cols:
-            if col in feature_cols:
-                X_train[col] = X_train[col].astype('category')
-                X_val[col] = X_val[col].astype('category')
-
-        # 创建LightGBM数据集
-        train_data = lgb.Dataset(
-            X_train,
-            label=y_train,
-            categorical_feature=[col for col in categorical_cols if col in feature_cols]
-        )
-
-        val_data = lgb.Dataset(
-            X_val,
-            label=y_val,
-            categorical_feature=[col for col in categorical_cols if col in feature_cols],
-            reference=train_data
-        )
-
-        # 使用现有模型作为初始模型，继续训练
-        callbacks = [lgb.early_stopping(50), lgb.log_evaluation(50)]
-
-        # 调整训练参数以适应增量训练
-        incremental_params = self.config.get('lgbm_params', {}).copy()
-        incremental_params['learning_rate'] = incremental_params.get('learning_rate', 0.05) * 0.5  # 降低学习率
-        incremental_params['num_boost_round'] = 200  # 减少迭代次数
-
-        # 使用现有模型继续训练
-        self.lgbm_model = lgb.train(
-            params=incremental_params,
-            train_set=train_data,
-            valid_sets=[train_data, val_data],
-            valid_names=['train', 'valid'],
-            callbacks=callbacks,
-            init_model=self.lgbm_model,  # 使用现有模型
-            num_boost_round=incremental_params['num_boost_round']
-        )
-
-        # 评估更新后的模型
-        lgbm_preds = self.lgbm_model.predict(X_val)
-        auc_score = roc_auc_score(y_val, lgbm_preds)
-        logger.info(f"更新后的LightGBM模型验证AUC: {auc_score:.4f}")
-
-        # 更新特征重要性
-        self.feature_importance = pd.DataFrame({
-            'Feature': feature_cols,
-            'Importance': self.lgbm_model.feature_importance(importance_type='gain')
-        }).sort_values(by='Importance', ascending=False)
-
-        logger.info("LightGBM模型增量更新完成")
-
-    except Exception as e:
-        logger.error(f"增量更新LightGBM模型时出错: {str(e)}")
-
-
-def update_sequence_model(self, new_data_df):
-    """
-    增量更新序列模型
-
-    参数:
-        new_data_df (DataFrame): 新的交互数据
-    """
-    logger.info("开始增量更新序列模型...")
-
-    if not hasattr(self, 'sequence_model') or self.sequence_model is None:
-        logger.warning("序列模型不存在，将进行完整训练")
-        self.train_sequence_model()
-        return
-
-    try:
-        # 确保新数据包含必要的列
-        required_cols = ['user_id', 'app_id', 'is_recommended']
-        if not all(col in new_data_df.columns for col in required_cols):
-            logger.error("新数据缺少必要的列，无法执行增量训练")
-            return
-
-        # 合并新数据到现有数据集
-        # 这一步应该在update_lgbm_model中已经完成
-
-        # 重新创建序列特征
-        self.create_sequence_features()
-
-        # 准备序列数据
-        train_data = self.prepare_sequence_data(self.train_df)
-
-        # 检查是否有足够的序列数据
-        if len(train_data['sequences']) == 0:
-            logger.warning("没有足够的序列数据，跳过序列模型更新")
-            return
-
-        # 创建数据集和数据加载器
-        train_dataset = torch.utils.data.Dataset(
-            train_data['sequences'],
-            train_data['targets']
-        )
-
-        # 数据整理函数
-        def collate_fn(batch):
-            # 提取序列和目标
-            sequences, targets = zip(*batch)
-
-            # 计算每个序列的长度
-            seq_lengths = torch.tensor([len(seq) for seq in sequences])
-
-            # 填充序列到相同长度
-            max_len = max(seq_lengths).item()
-            padded_sequences = torch.zeros(len(sequences), max_len, dtype=torch.long)
-
-            for i, seq in enumerate(sequences):
-                end = seq_lengths[i]
-                padded_sequences[i, :end] = torch.tensor(seq[:end])
-
-            # 转换目标为张量
-            targets = torch.tensor(targets, dtype=torch.float32)
-
-            return padded_sequences, seq_lengths, targets
-
-        # 创建数据加载器
-        train_loader = torch.utils.data.DataLoader(
-            train_dataset,
-            batch_size=self.config['sequence_params']['batch_size'],
-            shuffle=True,
-            collate_fn=collate_fn
-        )
-
-        # 设置模型为训练模式
-        self.sequence_model.train()
-
-        # 定义损失函数和优化器
-        criterion = nn.BCELoss()
-
-        # 使用较小的学习率进行增量更新
-        incremental_lr = self.config['sequence_params']['learning_rate'] * 0.1
-        optimizer = optim.Adam(self.sequence_model.parameters(), lr=incremental_lr)
-
-        # 训练模型（少量轮次）
-        epochs = min(5, self.config['sequence_params']['epochs'])
-
-        for epoch in range(epochs):
-            total_loss = 0
-
-            for sequences, seq_lengths, targets in train_loader:
-                # 移动数据到设备
-                sequences = sequences.to(self.device)
-                seq_lengths = seq_lengths.to(self.device)
-                targets = targets.to(self.device)
-
-                # 前向传播
-                optimizer.zero_grad()
-                outputs = self.sequence_model(sequences, seq_lengths)
-
-                # 计算损失
-                loss = criterion(outputs, targets)
-
-                # 反向传播
-                loss.backward()
-                optimizer.step()
-
-                total_loss += loss.item()
-
-            avg_loss = total_loss / len(train_loader)
-            logger.info(f"Epoch {epoch + 1}/{epochs}, Loss: {avg_loss:.4f}")
-
-        # 设置为评估模式
-        self.sequence_model.eval()
-
-        logger.info("序列模型增量更新完成")
-
-    except Exception as e:
-        logger.error(f"增量更新序列模型时出错: {str(e)}")
-
-
-def update_content_model(self, new_games_df):
-    """
-    增量更新内容模型
-
-    参数:
-        new_games_df (DataFrame): 新的游戏数据
-    """
-    logger.info("开始增量更新内容模型...")
-
-    try:
-        # 检查现有内容相似度矩阵是否存在
-        if not hasattr(self, 'content_similarity') or self.content_similarity is None:
-            logger.warning("内容相似度矩阵不存在，将进行完整训练")
-            self.train_content_model()
-            return
-
-        # 检查是否有新游戏
-        if 'app_id' not in new_games_df.columns:
-            logger.error("新数据缺少app_id列，无法执行增量训练")
-            return
-
-        # 获取已有的游戏ID集合
-        if hasattr(self, 'content_similarity') and 'game_idx' in self.content_similarity:
-            existing_game_ids = set(self.content_similarity['game_idx'].keys())
-        else:
-            existing_game_ids = set()
-
-        # 筛选新游戏
-        new_game_ids = set(new_games_df['app_id'].values) - existing_game_ids
-
-        if not new_game_ids:
-            logger.info("没有新的游戏，跳过内容模型更新")
-            return
-
-        logger.info(f"发现 {len(new_game_ids)} 个新游戏，更新内容模型")
-
-        # 重新训练内容模型
-        # 这里简单地重新训练整个模型，因为添加新游戏需要重新计算相似度矩阵
-        self.train_content_model()
-
-        logger.info("内容模型增量更新完成")
-
-    except Exception as e:
-        logger.error(f"增量更新内容模型时出错: {str(e)}")
 
 
 # 封装所有增量更新为一个方法
