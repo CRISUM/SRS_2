@@ -13,3 +13,5 @@ src/steam_recommender.log
 /src/kafka/__pycache__
 /src/models/__pycache__
 /src/visualization/__pycache__
+/recommender_model/hybrid/item_knn
+/recommender_model

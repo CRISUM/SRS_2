@@ -59,19 +59,27 @@ class KNNModel(BaseRecommenderModel):
         # Determine the input type and process accordingly
         if isinstance(data, pd.DataFrame):
             # Extract the necessary columns
-            if 'rating' in data.columns:
-                rating_col = 'rating'
+            df_subset = data[['user_id', 'app_id']].copy()
+
+            # 优先使用 rating_new 列
+            if 'rating_new' in data.columns and pd.api.types.is_numeric_dtype(data['rating_new']):
+                df_subset['rating_value'] = data['rating_new']
+                rating_col = 'rating_value'
+            elif 'rating' in data.columns and pd.api.types.is_numeric_dtype(data['rating']):
+                df_subset['rating_value'] = data['rating']
+                rating_col = 'rating_value'
             elif 'is_recommended' in data.columns:
                 # Convert boolean to numeric value
-                data['rating_value'] = data['is_recommended'].astype(int) * 10
+                df_subset['rating_value'] = data['is_recommended'].astype(int) * 10
                 rating_col = 'rating_value'
             else:
                 # Use hours as interaction value
-                rating_col = 'hours'
+                df_subset['rating_value'] = data['hours'].fillna(0)
+                rating_col = 'rating_value'
 
             # Create pivot table
             self.user_item_matrix = pd.pivot_table(
-                data,
+                df_subset,
                 values=rating_col,
                 index='user_id',
                 columns='app_id',
@@ -474,3 +482,110 @@ class KNNModel(BaseRecommenderModel):
 
         logger.info(f"{self.type}-based KNN model updated successfully")
         return self
+
+    def save(self, path):
+        """Save model to disk
+
+        Args:
+            path (str): Directory path
+
+        Returns:
+            bool: Success
+        """
+        logger.info(f"Saving {self.type}-based KNN model to {path}")
+
+        os.makedirs(path, exist_ok=True)
+
+        try:
+            # Save model data
+            model_data = {
+                'type': self.type,
+                'n_neighbors': self.n_neighbors,
+                'metric': self.metric,
+                'algorithm': self.algorithm,
+                'user_indices': self.user_indices,
+                'item_indices': self.item_indices,
+                'reversed_user_indices': self.reversed_user_indices,
+                'reversed_item_indices': self.reversed_item_indices
+            }
+
+            with open(os.path.join(path, 'knn_model_metadata.pkl'), 'wb') as f:
+                pickle.dump(model_data, f)
+
+            # Save user-item matrix
+            if self.user_item_matrix is not None:
+                self.user_item_matrix.to_pickle(os.path.join(path, 'user_item_matrix.pkl'))
+
+            # Save sparse matrix
+            if self.sparse_matrix is not None:
+                with open(os.path.join(path, 'sparse_matrix.pkl'), 'wb') as f:
+                    pickle.dump(self.sparse_matrix, f)
+
+            logger.info(f"{self.type}-based KNN model saved successfully")
+            return True
+        except Exception as e:
+            logger.error(f"Error saving KNN model: {str(e)}")
+            return False
+
+    def load(self, path):
+        """Load model from disk
+
+        Args:
+            path (str): Directory path
+
+        Returns:
+            self: Loaded model
+        """
+        logger.info(f"Loading KNN model from {path}")
+
+        try:
+            # Load model metadata
+            with open(os.path.join(path, 'knn_model_metadata.pkl'), 'rb') as f:
+                model_data = pickle.load(f)
+
+            self.type = model_data['type']
+            self.n_neighbors = model_data['n_neighbors']
+            self.metric = model_data['metric']
+            self.algorithm = model_data['algorithm']
+            self.user_indices = model_data['user_indices']
+            self.item_indices = model_data['item_indices']
+            self.reversed_user_indices = model_data['reversed_user_indices']
+            self.reversed_item_indices = model_data['reversed_item_indices']
+
+            # Load user-item matrix
+            user_item_matrix_path = os.path.join(path, 'user_item_matrix.pkl')
+            if os.path.exists(user_item_matrix_path):
+                self.user_item_matrix = pd.read_pickle(user_item_matrix_path)
+
+            # Load sparse matrix
+            sparse_matrix_path = os.path.join(path, 'sparse_matrix.pkl')
+            if os.path.exists(sparse_matrix_path):
+                with open(sparse_matrix_path, 'rb') as f:
+                    self.sparse_matrix = pickle.load(f)
+
+            # Recreate the model
+            if self.sparse_matrix is not None:
+                if self.type == 'user':
+                    n_neighbors = min(self.n_neighbors, self.sparse_matrix.shape[0])
+                    self.model = NearestNeighbors(
+                        n_neighbors=n_neighbors,
+                        metric=self.metric,
+                        algorithm=self.algorithm,
+                        n_jobs=-1
+                    )
+                    self.model.fit(self.sparse_matrix)
+                else:
+                    n_neighbors = min(self.n_neighbors, self.sparse_matrix.shape[1])
+                    self.model = NearestNeighbors(
+                        n_neighbors=n_neighbors,
+                        metric=self.metric,
+                        algorithm=self.algorithm,
+                        n_jobs=-1
+                    )
+                    self.model.fit(self.sparse_matrix.T)
+
+            logger.info("KNN model loaded successfully")
+            return self
+        except Exception as e:
+            logger.error(f"Error loading KNN model: {str(e)}")
+            return None

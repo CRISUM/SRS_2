@@ -310,6 +310,16 @@ class SteamDataProcessor:
             else:
                 self.train_df = self.train_df.sort_values('user_id')
 
+            # 首先创建新列
+            self.train_df['prev_apps'] = None
+            self.train_df['prev_ratings'] = None
+            self.train_df['prev_hours'] = None
+
+            # 同样为测试数据创建列
+            self.test_df['prev_apps'] = None
+            self.test_df['prev_ratings'] = None
+            self.test_df['prev_hours'] = None
+
             # Create user history sequences
             user_sequences = {}
 
@@ -438,7 +448,7 @@ class SteamDataProcessor:
             logger.info(f"随机划分数据，训练集: {len(train_df)}条, 测试集: {len(test_df)}条")
 
         return train_df, test_df
-    
+
     def get_processed_data(self):
         """Return processed data"""
         return {

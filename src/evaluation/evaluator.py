@@ -31,24 +31,14 @@ class RecommenderEvaluator:
         self.results = None
 
     def evaluate(self, model, test_df, test_users=None, k_values=None):
-        """Evaluate model performance
-
-        Args:
-            model: Recommendation model to evaluate
-            test_df: Test data
-            test_users: List of users to evaluate (if None, sample from test_df)
-            k_values: List of k values for evaluation metrics (overrides init values)
-
-        Returns:
-            dict: Evaluation metrics
-        """
+        """Evaluate model performance"""
         logger.info("Starting model evaluation...")
 
         try:
-            # Use provided k values or default ones
+            # 使用提供的k值或默认值
             k_values = k_values or self.k_values
 
-            # Limit number of test users for efficiency
+            # 限制测试用户数量，提高效率
             if test_users is None:
                 user_ids = test_df['user_id'].unique()
                 max_users = min(100, len(user_ids))
@@ -56,7 +46,7 @@ class RecommenderEvaluator:
 
             logger.info(f"Evaluating model with {len(test_users)} test users")
 
-            # Initialize metrics
+            # 初始化指标
             metrics = {
                 'precision': {k: [] for k in k_values},
                 'recall': {k: [] for k in k_values},
@@ -65,65 +55,79 @@ class RecommenderEvaluator:
                 'coverage': []
             }
 
-            # Track all recommended items for coverage calculation
+            # 跟踪所有推荐的物品，用于计算覆盖率
             all_recommended_items = set()
             all_items = set(test_df['app_id'].unique())
 
-            # Evaluate for each test user
+            # 记录成功评估的用户数
+            successful_users = 0
+
+            # 评估每个测试用户
             for user_id in tqdm(test_users, desc="Evaluating users"):
-                # Get user's relevant items (positive interactions)
+                # 获取用户的相关物品(正向交互)
                 user_relevant_items = set(test_df[
                                               (test_df['user_id'] == user_id) &
                                               (test_df['is_recommended'] == True)
                                               ]['app_id'].values)
 
-                # Skip users with no relevant items
+                # 跳过没有相关物品的用户
                 if not user_relevant_items:
                     continue
 
-                # Get recommendations for this user
+                # 获取该用户的推荐
                 max_k = max(k_values)
                 try:
                     recommendations = model.recommend(user_id, max_k)
+                    if not recommendations:
+                        logger.warning(f"No recommendations generated for user {user_id}")
+                        continue
+
                     recommended_items = [item_id for item_id, _ in recommendations]
+                    successful_users += 1
                 except Exception as e:
                     logger.error(f"Error getting recommendations for user {user_id}: {str(e)}")
                     continue
 
-                # Update coverage tracking
+                # 更新覆盖率跟踪
                 all_recommended_items.update(recommended_items)
 
-                # Calculate metrics for each k
+                # 计算每个k值的指标
                 for k in k_values:
-                    # Get top-k recommendations
+                    # 获取top-k推荐
                     top_k_items = recommended_items[:k]
 
-                    # Calculate precision and recall
+                    # 计算精确度和召回率
                     precision, recall = self.calculate_precision_recall(user_relevant_items, top_k_items, k)
                     metrics['precision'][k].append(precision)
                     metrics['recall'][k].append(recall)
 
-                    # Calculate NDCG
+                    # 计算NDCG
                     ndcg = self.calculate_ndcg(user_relevant_items, top_k_items, k)
                     metrics['ndcg'][k].append(ndcg)
 
-                    # Calculate diversity if tag data is available
+                    # 如果有标签数据，计算多样性
                     diversity = self.calculate_diversity(top_k_items, test_df, k)
                     if diversity is not None:
                         metrics['diversity'][k].append(diversity)
 
-            # Calculate coverage
+            # 计算覆盖率
             coverage = len(all_recommended_items) / len(all_items) if len(all_items) > 0 else 0
             metrics['coverage'] = coverage
 
-            # Calculate average metrics
+            # 如果没有成功评估用户，返回None
+            if successful_users == 0:
+                logger.warning("No users could be successfully evaluated")
+                return None
+
+            # 计算平均指标
             results = {}
             for metric in ['precision', 'recall', 'ndcg', 'diversity']:
                 results[metric] = {k: np.mean(metrics[metric][k]) if metrics[metric][k] else 0 for k in k_values}
 
             results['coverage'] = metrics['coverage']
+            results['successful_users'] = successful_users
 
-            # Log results
+            # 记录结果
             logger.info("Evaluation results:")
             for metric in ['precision', 'recall', 'ndcg', 'diversity']:
                 logger.info(f"{metric.capitalize()}:")
@@ -131,8 +135,9 @@ class RecommenderEvaluator:
                     logger.info(f"  @{k}: {results[metric][k]:.4f}")
 
             logger.info(f"Coverage: {results['coverage']:.4f}")
+            logger.info(f"Successfully evaluated {successful_users} out of {len(test_users)} users")
 
-            # Store results
+            # 存储结果
             self.results = results
             return results
 

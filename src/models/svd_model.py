@@ -54,24 +54,28 @@ class SVDModel(BaseRecommenderModel):
 
         if isinstance(data, pd.DataFrame):
             # Convert DataFrame to user-item matrix
-            if 'rating' in data.columns:
-                rating_col = 'rating'
+            df_subset = data[['user_id', 'app_id']].copy()
+
+            # 优先使用 rating_new 列
+            if 'rating_new' in data.columns and pd.api.types.is_numeric_dtype(data['rating_new']):
+                df_subset['rating_value'] = data['rating_new']
+                rating_col = 'rating_value'
+            elif 'rating' in data.columns and pd.api.types.is_numeric_dtype(data['rating']):
+                df_subset['rating_value'] = data['rating']
+                rating_col = 'rating_value'
             elif 'is_recommended' in data.columns:
                 # Convert boolean to numeric
-                data['rating_value'] = data['is_recommended'].astype(int) * 10
+                df_subset['rating_value'] = data['is_recommended'].astype(int) * 10
                 rating_col = 'rating_value'
             else:
                 # Use hours as rating
                 rating_col = 'hours'
-                # Normalize hours to 0-10 scale for consistency
-                max_hours = data['hours'].max()
-                if max_hours > 0:
-                    data['rating_value'] = data['hours'] * 10 / max_hours
-                    rating_col = 'rating_value'
+                df_subset['rating_value'] = data['hours'].fillna(0)
+                rating_col = 'rating_value'
 
             # Create user-item matrix
             self.user_item_matrix = pd.pivot_table(
-                data,
+                df_subset,
                 values=rating_col,
                 index='user_id',
                 columns='app_id',

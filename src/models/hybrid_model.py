@@ -160,26 +160,36 @@ class HybridRecommender(BaseRecommenderModel):
         Returns:
             list: List of (item_id, score) tuples
         """
-        # Check cache first
+        # 检查缓存
         cache_key = f"{user_id}_{n}"
         if cache_key in self.recommendation_cache:
             return self.recommendation_cache[cache_key]
 
-        # Check if any models are available
+        # 检查是否有可用模型
         if not self.models:
             logger.warning("No models available for recommendations")
             return self.popular_items[:n] if self.popular_items else []
 
-        # Get recommendations from all models
+        # 初始化标志，判断用户是否是冷启动用户
+        is_cold_start = True
+
+        # 从各个模型获取推荐
         all_recommendations = {}
         model_recommendations = {}
+        model_success_count = 0
 
         for name, model in self.models.items():
             try:
-                recommendations = model.recommend(user_id, n * 3)  # Get more than needed to allow for overlap
+                recommendations = model.recommend(user_id, n * 3)  # 获取更多推荐以允许重叠
+
+                # 如果成功获得推荐，用户不是冷启动用户
+                if recommendations and len(recommendations) > 0:
+                    is_cold_start = False
+                    model_success_count += 1
+
                 model_recommendations[name] = recommendations
 
-                # Add to all recommendations with model weight
+                # 使用模型权重添加到所有推荐中
                 weight = self.weights.get(name, 0.0)
                 for item_id, score in recommendations:
                     if item_id not in all_recommendations:
@@ -188,17 +198,20 @@ class HybridRecommender(BaseRecommenderModel):
             except Exception as e:
                 logger.warning(f"Error getting recommendations from {name} model: {str(e)}")
 
-        # If no recommendations were generated, return popular items
-        if not all_recommendations:
+        # 如果没有获得足够的推荐，使用热门物品
+        if is_cold_start or model_success_count < 2 or not all_recommendations:
+            logger.info(f"Using popular items for user {user_id} (cold start or insufficient recommendations)")
             if self.popular_items:
-                return self.popular_items[:n]
+                recommendations = self.popular_items[:n]
+                self.recommendation_cache[cache_key] = recommendations
+                return recommendations
             else:
                 return []
 
-        # Sort by score in descending order
+        # 按得分降序排序
         sorted_items = sorted(all_recommendations.items(), key=lambda x: x[1], reverse=True)
 
-        # Store in cache
+        # 存入缓存
         recommendations = sorted_items[:n]
         self.recommendation_cache[cache_key] = recommendations
 

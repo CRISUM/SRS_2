@@ -238,27 +238,33 @@ class SteamRecommender:
             self.models['content'] = content_sim
 
             # 5. Create hybrid recommender
-            logger.info("Creating hybrid recommender...")
-            model_weights = {
-                'user_knn': self.config['user_knn_weight'],
-                'item_knn': self.config['item_knn_weight'],
-                'svd': self.config['svd_weight'],
-                'sequence': self.config['sequence_weight'],
-                'content': self.config['content_weight']
-            }
+            if all(model is not None for model in self.models.values()):
+                logger.info("Creating hybrid recommender...")
+                model_weights = {
+                    'user_knn': self.config['user_knn_weight'],
+                    'item_knn': self.config['item_knn_weight'],
+                    'svd': self.config['svd_weight'],
+                    'sequence': self.config['sequence_weight'],
+                    'content': self.config['content_weight']
+                }
 
-            self.hybrid_model = HybridRecommender(self.models, model_weights)
+                self.hybrid_model = HybridRecommender(self.models, model_weights)
 
-            # 6. Prepare popular items for cold start
-            popular_games = self.get_popular_games(20)
-            self.hybrid_model.popular_items = popular_games
+                # 6. Prepare popular items for cold start
+                popular_games = self.get_popular_games(20)
+                self.hybrid_model.popular_items = popular_games
 
-            logger.info("All models trained successfully")
-            return True
+                logger.info("All models trained successfully")
+                return True
+            else:
+                logger.error("Some models failed to train, hybrid model creation skipped")
+                return False
 
         except Exception as e:
             logger.error(f"Error training models: {str(e)}")
             logger.error(traceback.format_exc())
+            # 确保出错时hybrid_model被设为None
+            self.hybrid_model = None
             return False
 
     def generate_recommendations(self, user_id, n=10):
@@ -307,6 +313,16 @@ class SteamRecommender:
         logger.info("Evaluating recommendation performance...")
 
         try:
+            # 检查hybrid_model是否可用
+            if self.hybrid_model is None:
+                logger.error("Hybrid model is not available for evaluation")
+                return None
+
+            # 检查测试数据是否可用
+            if not hasattr(self.data_processor, 'test_df') or self.data_processor.test_df is None:
+                logger.error("No test data available for evaluation")
+                return None
+
             # Set default k values if not provided
             if k_values is None:
                 k_values = [5, 10, 20]
