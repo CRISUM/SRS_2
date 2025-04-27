@@ -417,7 +417,9 @@ class SteamDataProcessor:
     def split_train_test(self, test_size=0.2, random_state=42, by_time=True):
         """Split data into training and test sets"""
         from sklearn.model_selection import train_test_split
-        df = self.train_df
+
+        # 使用 self.df 而不是参数传入的 df
+        df = self.df
 
         if by_time and 'date' in df.columns:
             # 按时间划分
@@ -431,12 +433,12 @@ class SteamDataProcessor:
             # 随机划分
             stratify_col = df['is_recommended'] if 'is_recommended' in df.columns else None
             train_df, test_df = train_test_split(
-                df, test_size=test_size, random_state=42, stratify=stratify_col
+                df, test_size=test_size, random_state=random_state, stratify=stratify_col
             )
             logger.info(f"随机划分数据，训练集: {len(train_df)}条, 测试集: {len(test_df)}条")
 
         return train_df, test_df
-
+    
     def get_processed_data(self):
         """Return processed data"""
         return {
@@ -456,7 +458,7 @@ class SteamDataProcessor:
 
             # 使用已有的 split_train_test 方法
             self.train_df, self.test_df = self.split_train_test(
-                self.df, test_size=test_size, random_state=random_state
+                test_size=test_size, random_state=random_state
             )
 
             logger.info(
