@@ -38,53 +38,52 @@ class SteamDataProcessor:
             column_names = header_df.columns.tolist()
             logger.info(f"Data columns: {column_names}")
 
-            # Check if required columns exist
+            # 检查必要的列
             required_cols = ['user_id', 'app_id', 'is_recommended', 'hours', 'title', 'tags']
             missing_cols = [col for col in required_cols if col not in column_names]
             if missing_cols:
                 logger.error(f"CSV missing required columns: {missing_cols}")
-
-                # Look for possible matching columns (case-insensitive)
+                # 尝试匹配列名
                 column_lower = [col.lower() for col in column_names]
                 for missing in missing_cols:
                     possible_matches = [column_names[i] for i, col in enumerate(column_lower) if
                                         col == missing.lower()]
                     if possible_matches:
                         logger.info(f"'{missing}' possible matches: {possible_matches}")
-
                 return False
         except Exception as e:
             logger.error(f"Error reading CSV header: {str(e)}")
             return False
 
-        # Initialize statistics tracking
+        # 初始化统计信息跟踪
         unique_users = set()
         unique_games = set()
         user_stats = {}
         game_stats = {}
         chunk_count = 0
+        all_data = []  # 用于存储所有数据
 
         try:
-            for chunk in pd.read_csv(self.data_path, chunksize=chunk_size):
+            for chunk in pd.read_csv(data_path, chunksize=chunk_size):
                 chunk_count += 1
                 logger.info(f"Processing data chunk {chunk_count}")
 
-                # Ensure necessary columns exist
+                # 确保必要的列存在
                 for col in required_cols:
                     if col not in chunk.columns:
                         logger.warning(f"Chunk {chunk_count} missing column '{col}', skipping")
                         continue
 
-                # Update statistics
+                # 更新统计信息
                 unique_users.update(chunk['user_id'].unique())
                 unique_games.update(chunk['app_id'].unique())
 
-                # Process user statistics
+                # 处理用户统计信息
                 for _, row in chunk.iterrows():
                     user_id = row['user_id']
                     app_id = row['app_id']
 
-                    # Handle possible missing values
+                    # 处理可能的缺失值
                     try:
                         is_recommended = row['is_recommended']
                         hours = float(row['hours']) if not pd.isna(row['hours']) else 0.0
@@ -92,7 +91,7 @@ class SteamDataProcessor:
                         is_recommended = False
                         hours = 0.0
 
-                    # Update user stats
+                    # 更新用户统计
                     if user_id not in user_stats:
                         user_stats[user_id] = {'game_count': 0, 'total_hours': 0, 'recommended_count': 0}
                     user_stats[user_id]['game_count'] += 1
@@ -100,7 +99,7 @@ class SteamDataProcessor:
                     if is_recommended:
                         user_stats[user_id]['recommended_count'] += 1
 
-                    # Update game stats
+                    # 更新游戏统计
                     if app_id not in game_stats:
                         title = row.get('title', f"Unknown Game {app_id}")
                         tags = row.get('tags', "")
@@ -117,13 +116,16 @@ class SteamDataProcessor:
                     if is_recommended:
                         game_stats[app_id]['recommended_count'] += 1
 
-                # Free memory
+                # 存储当前数据块
+                all_data.append(chunk)
+
+                # 释放内存
                 del chunk
                 gc.collect()
 
             logger.info(f"Processed {chunk_count} data chunks")
 
-            # Convert statistics to DataFrames
+            # 将统计信息转换为 DataFrames
             self.user_df = pd.DataFrame.from_dict(user_stats, orient='index')
             self.user_df.reset_index(inplace=True)
             self.user_df.rename(columns={'index': 'user_id'}, inplace=True)
@@ -132,16 +134,22 @@ class SteamDataProcessor:
             self.game_df.reset_index(inplace=True)
             self.game_df.rename(columns={'index': 'app_id'}, inplace=True)
 
-            # Calculate additional statistics
+            # 计算额外统计信息
             self.user_df['recommendation_ratio'] = self.user_df['recommended_count'] / self.user_df['game_count']
             self.game_df['recommendation_ratio'] = self.game_df['recommended_count'] / self.game_df['user_count']
             self.game_df['avg_hours'] = self.game_df['total_hours'] / self.game_df['user_count']
 
-            # Sample data for training
-            self._create_training_sample()
+            # 合并所有数据块创建主数据框
+            if all_data:
+                self.df = pd.concat(all_data, ignore_index=True)
+            else:
+                logger.warning("No data chunks were processed")
+                return False
 
-            logger.info(
-                f"Data loading complete, found {len(unique_users)} unique users and {len(unique_games)} games")
+            # 创建训练和测试样本
+            self.split_data_into_train_test()
+
+            logger.info(f"Data loading complete, found {len(unique_users)} unique users and {len(unique_games)} games")
             return True
 
         except Exception as e:
@@ -436,3 +444,25 @@ class SteamDataProcessor:
             'train_df': self.train_df,
             'test_df': self.test_df
         }
+
+    def split_data_into_train_test(self, test_size=0.2, random_state=42):
+        """Split data into training and test sets"""
+        logger.info("Splitting data into training and test sets")
+
+        try:
+            if not hasattr(self, 'df') or self.df is None or len(self.df) == 0:
+                logger.error("No data available for splitting")
+                return False
+
+            # 使用已有的 split_train_test 方法
+            self.train_df, self.test_df = self.split_train_test(
+                self.df, test_size=test_size, random_state=random_state
+            )
+
+            logger.info(
+                f"Data split completed: Training set: {len(self.train_df)} samples, Test set: {len(self.test_df)} samples")
+            return True
+        except Exception as e:
+            logger.error(f"Error splitting data: {str(e)}")
+            logger.error(traceback.format_exc())
+            return False
