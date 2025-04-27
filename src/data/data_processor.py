@@ -30,11 +30,11 @@ class SteamDataProcessor:
 
     def load_data(self, data_path, chunk_size=500000):
         """Load data in chunks"""
-        logger.info(f"Loading data in chunks: {self.data_path}")
+        logger.info(f"Loading data in chunks: {data_path}")
 
         # First read header to get column names
         try:
-            header_df = pd.read_csv(self.data_path, nrows=1)
+            header_df = pd.read_csv(data_path, nrows=1)
             column_names = header_df.columns.tolist()
             logger.info(f"Data columns: {column_names}")
 

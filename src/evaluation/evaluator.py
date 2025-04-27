@@ -11,6 +11,9 @@ Description: Implements metrics and evaluation functions for recommendation mode
 import numpy as np
 import pandas as pd
 import logging
+import traceback
+from tqdm import tqdm
+from sklearn.metrics import ndcg_score
 
 logger = logging.getLogger(__name__)
 
@@ -27,32 +30,237 @@ class RecommenderEvaluator:
         self.k_values = k_values or [5, 10, 20]
         self.results = None
 
-    def evaluate(self, model, test_df, test_users=None):
+    def evaluate(self, model, test_df, test_users=None, k_values=None):
         """Evaluate model performance
 
         Args:
             model: Recommendation model to evaluate
             test_df: Test data
             test_users: List of users to evaluate (if None, sample from test_df)
+            k_values: List of k values for evaluation metrics (overrides init values)
 
         Returns:
             dict: Evaluation metrics
         """
-        # Implement evaluation logic
-        # Extract from your existing evaluate_recommendations method
+        logger.info("Starting model evaluation...")
+
+        try:
+            # Use provided k values or default ones
+            k_values = k_values or self.k_values
+
+            # Limit number of test users for efficiency
+            if test_users is None:
+                user_ids = test_df['user_id'].unique()
+                max_users = min(100, len(user_ids))
+                test_users = np.random.choice(user_ids, max_users, replace=False)
+
+            logger.info(f"Evaluating model with {len(test_users)} test users")
+
+            # Initialize metrics
+            metrics = {
+                'precision': {k: [] for k in k_values},
+                'recall': {k: [] for k in k_values},
+                'ndcg': {k: [] for k in k_values},
+                'diversity': {k: [] for k in k_values},
+                'coverage': []
+            }
+
+            # Track all recommended items for coverage calculation
+            all_recommended_items = set()
+            all_items = set(test_df['app_id'].unique())
+
+            # Evaluate for each test user
+            for user_id in tqdm(test_users, desc="Evaluating users"):
+                # Get user's relevant items (positive interactions)
+                user_relevant_items = set(test_df[
+                                              (test_df['user_id'] == user_id) &
+                                              (test_df['is_recommended'] == True)
+                                              ]['app_id'].values)
+
+                # Skip users with no relevant items
+                if not user_relevant_items:
+                    continue
+
+                # Get recommendations for this user
+                max_k = max(k_values)
+                try:
+                    recommendations = model.recommend(user_id, max_k)
+                    recommended_items = [item_id for item_id, _ in recommendations]
+                except Exception as e:
+                    logger.error(f"Error getting recommendations for user {user_id}: {str(e)}")
+                    continue
+
+                # Update coverage tracking
+                all_recommended_items.update(recommended_items)
+
+                # Calculate metrics for each k
+                for k in k_values:
+                    # Get top-k recommendations
+                    top_k_items = recommended_items[:k]
+
+                    # Calculate precision and recall
+                    precision, recall = self.calculate_precision_recall(user_relevant_items, top_k_items, k)
+                    metrics['precision'][k].append(precision)
+                    metrics['recall'][k].append(recall)
+
+                    # Calculate NDCG
+                    ndcg = self.calculate_ndcg(user_relevant_items, top_k_items, k)
+                    metrics['ndcg'][k].append(ndcg)
+
+                    # Calculate diversity if tag data is available
+                    diversity = self.calculate_diversity(top_k_items, test_df, k)
+                    if diversity is not None:
+                        metrics['diversity'][k].append(diversity)
+
+            # Calculate coverage
+            coverage = len(all_recommended_items) / len(all_items) if len(all_items) > 0 else 0
+            metrics['coverage'] = coverage
+
+            # Calculate average metrics
+            results = {}
+            for metric in ['precision', 'recall', 'ndcg', 'diversity']:
+                results[metric] = {k: np.mean(metrics[metric][k]) if metrics[metric][k] else 0 for k in k_values}
+
+            results['coverage'] = metrics['coverage']
+
+            # Log results
+            logger.info("Evaluation results:")
+            for metric in ['precision', 'recall', 'ndcg', 'diversity']:
+                logger.info(f"{metric.capitalize()}:")
+                for k in k_values:
+                    logger.info(f"  @{k}: {results[metric][k]:.4f}")
+
+            logger.info(f"Coverage: {results['coverage']:.4f}")
+
+            # Store results
+            self.results = results
+            return results
+
+        except Exception as e:
+            logger.error(f"Error in model evaluation: {str(e)}")
+            logger.error(traceback.format_exc())
+            return None
 
     def calculate_precision_recall(self, true_items, pred_items, k):
-        """Calculate precision and recall at k"""
-        # Implement precision/recall calculation
+        """Calculate precision and recall at k
+
+        Args:
+            true_items (set): Set of relevant items
+            pred_items (list): List of recommended items
+            k (int): Recommendation list length
+
+        Returns:
+            tuple: (precision, recall)
+        """
+        # Count hits (items that are both recommended and relevant)
+        n_hits = len(set(pred_items) & true_items)
+
+        # Calculate precision
+        precision = n_hits / k if k > 0 else 0
+
+        # Calculate recall
+        recall = n_hits / len(true_items) if len(true_items) > 0 else 0
+
+        return precision, recall
 
     def calculate_ndcg(self, true_items, pred_items, k):
-        """Calculate NDCG at k"""
-        # Implement NDCG calculation
+        """Calculate NDCG at k
 
-    def calculate_diversity(self, pred_items, item_features, k):
-        """Calculate diversity at k"""
-        # Implement diversity calculation
+        Args:
+            true_items (set): Set of relevant items
+            pred_items (list): List of recommended items
+            k (int): Recommendation list length
+
+        Returns:
+            float: NDCG score
+        """
+        # Create relevance array (1 if item is relevant, 0 otherwise)
+        relevance = np.array([1 if item in true_items else 0 for item in pred_items])
+
+        # If no relevant items in recommendations, return 0
+        if sum(relevance) == 0:
+            return 0
+
+        # Create ideal relevance array
+        ideal_relevance = np.zeros_like(relevance)
+        ideal_relevance[:min(len(true_items), k)] = 1
+
+        # Calculate NDCG
+        try:
+            return ndcg_score([ideal_relevance], [relevance])
+        except:
+            # Manually calculate NDCG if sklearn version fails
+            # DCG = sum(rel_i / log2(i+1)) for i from 1 to k
+            dcg = sum(rel / np.log2(i + 2) for i, rel in enumerate(relevance))
+
+            # IDCG = sum(rel_i / log2(i+1)) for i from 1 to k (sorted)
+            idcg = sum(rel / np.log2(i + 2) for i, rel in enumerate(sorted(relevance, reverse=True)))
+
+            return dcg / idcg if idcg > 0 else 0
+
+    def calculate_diversity(self, pred_items, data_df, k):
+        """Calculate diversity at k
+
+        Args:
+            pred_items (list): List of recommended items
+            data_df (DataFrame): Data containing item metadata
+            k (int): Recommendation list length
+
+        Returns:
+            float: Diversity score (or None if tag data not available)
+        """
+        # Check if tags column exists
+        if 'tags' not in data_df.columns:
+            return None
+
+        # Get tag data for recommended items
+        item_tags = {}
+        for item_id in pred_items:
+            item_data = data_df[data_df['app_id'] == item_id]
+            if len(item_data) > 0 and 'tags' in item_data.columns and pd.notna(item_data['tags'].iloc[0]):
+                tags_str = item_data['tags'].iloc[0]
+                item_tags[item_id] = set(tag.strip() for tag in tags_str.split(','))
+            else:
+                item_tags[item_id] = set()
+
+        # Calculate pairwise Jaccard distance
+        if len(item_tags) < 2:
+            return 0  # Not enough items with tags
+
+        n_pairs = 0
+        sum_distances = 0
+
+        for i, (item1, tags1) in enumerate(item_tags.items()):
+            for item2, tags2 in list(item_tags.items())[i + 1:]:
+                # Skip if either set is empty
+                if not tags1 or not tags2:
+                    continue
+
+                # Calculate Jaccard similarity and distance
+                intersection = len(tags1 & tags2)
+                union = len(tags1 | tags2)
+
+                if union > 0:
+                    similarity = intersection / union
+                    distance = 1 - similarity
+                    sum_distances += distance
+                    n_pairs += 1
+
+        # Return average distance (higher means more diverse)
+        if n_pairs > 0:
+            return sum_distances / n_pairs
+        else:
+            return 0
 
     def calculate_coverage(self, all_pred_items, all_items):
-        """Calculate catalog coverage"""
-        # Implement coverage calculation
+        """Calculate catalog coverage
+
+        Args:
+            all_pred_items (set): Set of all recommended items
+            all_items (set): Set of all available items
+
+        Returns:
+            float: Coverage ratio
+        """
+        # Coverage = |recommended items| / |all items|
+        return len(all_pred_items) / len(all_items) if len(all_items) > 0 else 0

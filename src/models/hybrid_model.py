@@ -9,9 +9,13 @@ Description: Implements hybrid recommendation approach combining multiple models
 """
 
 import numpy as np
+import pandas as pd
 import logging
+import os
+import pickle
+import json
 
-from models.base_model import BaseRecommenderModel
+from .base_model import BaseRecommenderModel
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +32,310 @@ class HybridRecommender(BaseRecommenderModel):
         """
         self.models = models or {}
         self.weights = weights or {}
+        self.normalize_weights()
 
-    # Implement fit, predict, recommend, update, save, load methods
-    # This should coordinate the various models and combine their predictions
+        # Cache for recommendations
+        self.recommendation_cache = {}
+        self.item_data = {}
+        self.user_data = {}
+
+        # Cold start handling
+        self.popular_items = []
+
+    def normalize_weights(self):
+        """Normalize weights to sum to 1.0"""
+        if not self.weights:
+            return
+
+        weight_sum = sum(self.weights.values())
+        if weight_sum > 0:
+            for key in self.weights:
+                self.weights[key] = self.weights[key] / weight_sum
+
+    def add_model(self, name, model, weight=1.0):
+        """Add a model to the hybrid recommender
+
+        Args:
+            name (str): Model name
+            model: Model instance
+            weight (float): Weight for this model
+
+        Returns:
+            self: Updated hybrid recommender
+        """
+        self.models[name] = model
+        self.weights[name] = weight
+        self.normalize_weights()
+
+        # Clear cache when adding a new model
+        self.recommendation_cache = {}
+
+        return self
+
+    def fit(self, data):
+        """Train all models with provided data
+
+        Args:
+            data (dict): Dictionary mapping model names to their training data
+
+        Returns:
+            self: Trained hybrid recommender
+        """
+        logger.info("Training hybrid recommender models...")
+
+        if not isinstance(data, dict):
+            raise ValueError("Data must be a dictionary mapping model names to their training data")
+
+        # Train each model with its specific data
+        for name, model in self.models.items():
+            if name in data:
+                logger.info(f"Training {name} model...")
+                model.fit(data[name])
+            else:
+                logger.warning(f"No training data provided for {name} model")
+
+        # Extract item and user data if available
+        for name, model_data in data.items():
+            if isinstance(model_data, dict):
+                if 'item_data' in model_data:
+                    self.item_data.update(model_data['item_data'])
+                if 'user_data' in model_data:
+                    self.user_data.update(model_data['user_data'])
+
+        # Prepare popular items for cold start
+        if 'popular_items' in data:
+            self.popular_items = data['popular_items']
+
+        logger.info("Hybrid recommender training completed")
+        return self
+
+    def predict(self, user_id, item_id):
+        """Predict rating for a user-item pair
+
+        Args:
+            user_id: User ID
+            item_id: Item ID
+
+        Returns:
+            float: Predicted rating (0-1 scale)
+        """
+        # Check if any models are available
+        if not self.models:
+            logger.warning("No models available for prediction")
+            return 0.5
+
+        # Get predictions from all models
+        predictions = {}
+        for name, model in self.models.items():
+            try:
+                prediction = model.predict(user_id, item_id)
+                predictions[name] = prediction
+            except Exception as e:
+                logger.warning(f"Error getting prediction from {name} model: {str(e)}")
+                predictions[name] = 0.5  # Default score
+
+        # Calculate weighted average
+        weighted_sum = 0.0
+        weight_sum = 0.0
+
+        for name, prediction in predictions.items():
+            if name in self.weights:
+                weight = self.weights[name]
+                weighted_sum += prediction * weight
+                weight_sum += weight
+
+        # Return weighted average or default score
+        if weight_sum > 0:
+            return weighted_sum / weight_sum
+        else:
+            return 0.5
+
+    def recommend(self, user_id, n=10):
+        """Generate top-N recommendations for a user
+
+        Args:
+            user_id: User ID
+            n (int): Number of recommendations
+
+        Returns:
+            list: List of (item_id, score) tuples
+        """
+        # Check cache first
+        cache_key = f"{user_id}_{n}"
+        if cache_key in self.recommendation_cache:
+            return self.recommendation_cache[cache_key]
+
+        # Check if any models are available
+        if not self.models:
+            logger.warning("No models available for recommendations")
+            return self.popular_items[:n] if self.popular_items else []
+
+        # Get recommendations from all models
+        all_recommendations = {}
+        model_recommendations = {}
+
+        for name, model in self.models.items():
+            try:
+                recommendations = model.recommend(user_id, n * 3)  # Get more than needed to allow for overlap
+                model_recommendations[name] = recommendations
+
+                # Add to all recommendations with model weight
+                weight = self.weights.get(name, 0.0)
+                for item_id, score in recommendations:
+                    if item_id not in all_recommendations:
+                        all_recommendations[item_id] = 0.0
+                    all_recommendations[item_id] += score * weight
+            except Exception as e:
+                logger.warning(f"Error getting recommendations from {name} model: {str(e)}")
+
+        # If no recommendations were generated, return popular items
+        if not all_recommendations:
+            if self.popular_items:
+                return self.popular_items[:n]
+            else:
+                return []
+
+        # Sort by score in descending order
+        sorted_items = sorted(all_recommendations.items(), key=lambda x: x[1], reverse=True)
+
+        # Store in cache
+        recommendations = sorted_items[:n]
+        self.recommendation_cache[cache_key] = recommendations
+
+        return recommendations
+
+    def update(self, new_data):
+        """Update models with new data (incremental learning)
+
+        Args:
+            new_data (dict): Dictionary mapping model names to their update data
+
+        Returns:
+            self: Updated hybrid recommender
+        """
+        logger.info("Updating hybrid recommender models...")
+
+        if not isinstance(new_data, dict):
+            raise ValueError("New data must be a dictionary mapping model names to their update data")
+
+        # Update each model with its specific data
+        for name, model in self.models.items():
+            if name in new_data:
+                logger.info(f"Updating {name} model...")
+                try:
+                    model.update(new_data[name])
+                except Exception as e:
+                    logger.error(f"Error updating {name} model: {str(e)}")
+            else:
+                logger.debug(f"No update data provided for {name} model")
+
+        # Update item and user data if available
+        for name, model_data in new_data.items():
+            if isinstance(model_data, dict):
+                if 'item_data' in model_data:
+                    self.item_data.update(model_data['item_data'])
+                if 'user_data' in model_data:
+                    self.user_data.update(model_data['user_data'])
+
+        # Update popular items if provided
+        if 'popular_items' in new_data:
+            self.popular_items = new_data['popular_items']
+
+        # Clear cache after update
+        self.recommendation_cache = {}
+
+        logger.info("Hybrid recommender update completed")
+        return self
+
+    def save(self, path):
+        """Save hybrid recommender to disk
+
+        Args:
+            path (str): Directory path
+
+        Returns:
+            bool: Success
+        """
+        logger.info(f"Saving hybrid recommender to {path}")
+
+        os.makedirs(path, exist_ok=True)
+
+        try:
+            # Save weights
+            with open(os.path.join(path, 'hybrid_weights.json'), 'w') as f:
+                json.dump(self.weights, f, indent=2)
+
+            # Save model list
+            model_list = list(self.models.keys())
+            with open(os.path.join(path, 'hybrid_model_list.json'), 'w') as f:
+                json.dump(model_list, f, indent=2)
+
+            # Save popular items
+            with open(os.path.join(path, 'popular_items.pkl'), 'wb') as f:
+                pickle.dump(self.popular_items, f)
+
+            # Save model data
+            with open(os.path.join(path, 'hybrid_data.pkl'), 'wb') as f:
+                pickle.dump({
+                    'item_data': self.item_data,
+                    'user_data': self.user_data
+                }, f)
+
+            # Create directory for each model
+            for name, model in self.models.items():
+                model_dir = os.path.join(path, name)
+                os.makedirs(model_dir, exist_ok=True)
+                try:
+                    model.save(model_dir)
+                except Exception as e:
+                    logger.error(f"Error saving {name} model: {str(e)}")
+
+            logger.info("Hybrid recommender saved successfully")
+            return True
+        except Exception as e:
+            logger.error(f"Error saving hybrid recommender: {str(e)}")
+            return False
+
+    def load(self, path):
+        """Load hybrid recommender from disk
+
+        Args:
+            path (str): Directory path
+
+        Returns:
+            self: Loaded hybrid recommender
+        """
+        logger.info(f"Loading hybrid recommender from {path}")
+
+        try:
+            # Load weights
+            with open(os.path.join(path, 'hybrid_weights.json'), 'r') as f:
+                self.weights = json.load(f)
+
+            # Load model list
+            with open(os.path.join(path, 'hybrid_model_list.json'), 'r') as f:
+                model_list = json.load(f)
+
+            # Load popular items if available
+            try:
+                with open(os.path.join(path, 'popular_items.pkl'), 'rb') as f:
+                    self.popular_items = pickle.load(f)
+            except FileNotFoundError:
+                logger.warning("Popular items file not found")
+
+            # Load model data if available
+            try:
+                with open(os.path.join(path, 'hybrid_data.pkl'), 'rb') as f:
+                    data = pickle.load(f)
+                    self.item_data = data.get('item_data', {})
+                    self.user_data = data.get('user_data', {})
+            except FileNotFoundError:
+                logger.warning("Hybrid data file not found")
+
+            # Models need to be loaded by the main system
+            # We don't instantiate models here, just return the model list
+            logger.info(f"Hybrid recommender loaded with weights for models: {list(self.weights.keys())}")
+            return self, model_list
+        except Exception as e:
+            logger.error(f"Error loading hybrid recommender: {str(e)}")
+            return None

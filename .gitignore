@@ -8,3 +8,8 @@
 /src/trained_model
 src/steam_recommender.log
 src/steam_recommender.log
+/src/evaluation/__pycache__
+/src/data/__pycache__
+/src/kafka/__pycache__
+/src/models/__pycache__
+/src/visualization/__pycache__
