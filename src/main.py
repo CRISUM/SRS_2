@@ -38,6 +38,10 @@ def main():
     parser.add_argument('--max', type=int, default=None, help='Maximum message count')
     parser.add_argument('--batch-size', type=int, default=100, help='Incremental training batch size')
     parser.add_argument('--config', type=str, default=None, help='Configuration file path')
+    parser.add_argument('--test-knn', action='store_true', help='测试不同KNN邻居数量的效果')
+    parser.add_argument('--min-neighbors', type=int, default=10, help='KNN测试的最小邻居数量')
+    parser.add_argument('--max-neighbors', type=int, default=60, help='KNN测试的最大邻居数量')
+    parser.add_argument('--step-neighbors', type=int, default=10, help='KNN测试的邻居数量步长')
 
     args = parser.parse_args()
 
@@ -120,6 +124,22 @@ def main():
                     print(f"\n{metric.capitalize()}: {values:.4f}")
         else:
             logging.error("Evaluation requires model path")
+
+        # 添加KNN参数测试
+        if args.test_knn:
+            print("\n测试不同KNN参数的效果:")
+            user_range = range(args.min_neighbors, args.max_neighbors + 1, args.step_neighbors)
+            item_range = range(args.min_neighbors, args.max_neighbors + 1, args.step_neighbors)
+
+            knn_results = recommender.test_knn_clustering(
+                user_neighbors_range=list(user_range),
+                item_neighbors_range=list(item_range)
+            )
+
+            if knn_results:
+                print("\nKNN参数测试结果:")
+                for config, metrics in knn_results.items():
+                    print(f"配置 {config}: NDCG@10 = {metrics['ndcg'][10]:.4f}")
 
     elif args.mode == 'serve':
         # Kafka service mode

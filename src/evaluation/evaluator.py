@@ -54,7 +54,7 @@ class RecommenderEvaluator:
 
                 # 如果用户数量足够，随机选择100个用户
                 if len(users_with_recommendations) > 0:
-                    sample_size = min(100, len(users_with_recommendations))
+                    sample_size = min(200, len(users_with_recommendations))
                     test_users = np.random.choice(users_with_recommendations, sample_size, replace=False)
                     logger.info(f"Selected {len(test_users)} test users randomly from users with recommendations")
                 else:

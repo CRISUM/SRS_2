@@ -261,7 +261,7 @@ class HybridRecommender(BaseRecommenderModel):
         sorted_items = sorted(all_recommendations.items(), key=lambda x: x[1], reverse=True)
 
         # 增强多样性和覆盖率的策略
-        diversity_factor = getattr(self, 'diversity_factor', 0.2)  # 默认多样性因子
+        diversity_factor = getattr(self, 'diversity_factor', 0.3)  # 默认多样性因子
 
         # 1. 先选择一些顶级推荐
         selected_items = []

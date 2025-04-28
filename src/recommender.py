@@ -228,9 +228,9 @@ class SteamRecommender:
                 model_weights = {
                     'user_knn': self.config.get('user_knn_weight', 0.15),  # Reduced from 0.25
                     'item_knn': self.config.get('item_knn_weight', 0.30),  # Increased from 0.25
-                    'svd': self.config.get('svd_weight', 0.20),  # Reduced from 0.25
+                    'svd': self.config.get('svd_weight', 0.15),  # Reduced from 0.25
                     'sequence': self.config.get('sequence_weight', 0.15),  # Increased from 0.125
-                    'content': self.config.get('content_weight', 0.20)  # Increased from 0.125
+                    'content': self.config.get('content_weight', 0.25)  # Increased from 0.125
                 }
 
                 self.hybrid_model = HybridRecommender(self.models, model_weights)
@@ -513,11 +513,11 @@ class SteamRecommender:
             else:
                 # Create hybrid model
                 model_weights = {
-                    'user_knn': self.config.get('user_knn_weight', 0.25),
-                    'item_knn': self.config.get('item_knn_weight', 0.25),
+                    'user_knn': self.config.get('user_knn_weight', 0.15),
+                    'item_knn': self.config.get('item_knn_weight', 0.30),
                     'svd': self.config.get('svd_weight', 0.2),
                     'sequence': self.config.get('sequence_weight', 0.15),
-                    'content': self.config.get('content_weight', 0.15)
+                    'content': self.config.get('content_weight', 0.20)
                 }
                 self.hybrid_model = HybridRecommender(self.models, model_weights)
                 self.hybrid_model.popular_items = popular_games
@@ -1068,3 +1068,167 @@ class SteamRecommender:
             logger.error(f"Error in training and optimization process: {str(e)}")
             logger.error(traceback.format_exc())
             return False
+
+    def test_knn_clustering(self, user_neighbors_range=None, item_neighbors_range=None):
+        """测试不同KNN邻居数量对模型性能的影响
+
+        Args:
+            user_neighbors_range (list): 要测试的user_knn邻居数量列表
+            item_neighbors_range (list): 要测试的item_knn邻居数量列表
+
+        Returns:
+            dict: 不同参数组合的评估结果
+        """
+        logger.info("测试不同KNN邻居数量的影响...")
+
+        # 设置默认测试范围
+        if user_neighbors_range is None:
+            user_neighbors_range = [20, 30, 40, 50, 60]
+        if item_neighbors_range is None:
+            item_neighbors_range = [15, 20, 25, 30, 35]
+
+        # 存储原始配置以便测试后恢复
+        original_config = self.config.copy()
+
+        results = {}
+        best_ndcg = 0
+        best_params = None
+
+        try:
+            # 确保数据已加载
+            if not hasattr(self.data_processor, 'train_df') or self.data_processor.train_df is None:
+                logger.error("无法测试KNN参数：数据未加载")
+                return None
+
+            train_df = self.data_processor.train_df
+            test_df = self.data_processor.test_df
+
+            # 对每个参数组合进行测试
+            for u_neigh in user_neighbors_range:
+                for i_neigh in item_neighbors_range:
+                    config_key = f"user_{u_neigh}_item_{i_neigh}"
+                    logger.info(f"测试参数组合: user_neighbors={u_neigh}, item_neighbors={i_neigh}")
+
+                    # 更新配置
+                    self.config['knn_params']['user_neighbors'] = u_neigh
+                    self.config['knn_params']['item_neighbors'] = i_neigh
+
+                    # 训练KNN模型
+                    user_knn = KNNModel(type='user',
+                                        n_neighbors=u_neigh,
+                                        metric=self.config['knn_params']['metric'],
+                                        algorithm=self.config['knn_params']['algorithm'])
+                    user_knn.fit(train_df)
+
+                    item_knn = KNNModel(type='item',
+                                        n_neighbors=i_neigh,
+                                        metric=self.config['knn_params']['metric'],
+                                        algorithm=self.config['knn_params']['algorithm'])
+                    item_knn.fit(train_df)
+
+                    # 创建临时混合模型仅包含KNN模型
+                    temp_models = {'user_knn': user_knn, 'item_knn': item_knn}
+                    model_weights = {'user_knn': 0.5, 'item_knn': 0.5}
+                    temp_hybrid = HybridRecommender(temp_models, model_weights)
+
+                    # 评估结果
+                    metrics = self.evaluator.evaluate(
+                        model=temp_hybrid,
+                        test_df=test_df,
+                        k_values=[10]  # 仅使用k=10进行评估以提高速度
+                    )
+
+                    if metrics is not None:
+                        results[config_key] = metrics
+
+                        # 跟踪最佳参数
+                        ndcg_10 = metrics['ndcg'][10]
+                        if ndcg_10 > best_ndcg:
+                            best_ndcg = ndcg_10
+                            best_params = {
+                                'user_neighbors': u_neigh,
+                                'item_neighbors': i_neigh,
+                                'ndcg@10': ndcg_10
+                            }
+
+                        logger.info(f"参数组合 {config_key} 的NDCG@10: {ndcg_10:.4f}")
+
+            # 恢复原始配置
+            self.config = original_config
+
+            # 打印最佳参数
+            if best_params:
+                logger.info(f"最佳KNN参数: user_neighbors={best_params['user_neighbors']}, "
+                            f"item_neighbors={best_params['item_neighbors']}, "
+                            f"NDCG@10={best_params['ndcg@10']:.4f}")
+
+            return results
+
+        except Exception as e:
+            # 恢复原始配置
+            self.config = original_config
+
+            logger.error(f"测试KNN参数时出错: {str(e)}")
+            logger.error(traceback.format_exc())
+            return None
+
+    # 在recommender.py中添加以下函数
+    def cross_validate_models(self, k_folds=3):
+        """使用交叉验证评估模型性能"""
+        logger.info(f"Performing {k_folds}-fold cross validation...")
+
+        # 确保数据已加载
+        if not hasattr(self.data_processor, 'train_df') or self.data_processor.train_df is None:
+            logger.error("No training data available for cross validation")
+            return False
+
+        # 获取所有用户ID
+        all_users = self.data_processor.train_df['user_id'].unique()
+        np.random.shuffle(all_users)
+
+        # 划分用户为k个分组
+        user_folds = np.array_split(all_users, k_folds)
+
+        results = []
+        for i in range(k_folds):
+            logger.info(f"Cross validation fold {i + 1}/{k_folds}")
+
+            # 选择当前fold的测试用户
+            test_users = user_folds[i]
+
+            # 训练模型
+            self.train_models()
+
+            # 评估模型
+            metrics = self.evaluator.evaluate(
+                model=self.hybrid_model,
+                test_df=self.data_processor.test_df,
+                test_users=test_users
+            )
+
+            if metrics:
+                results.append(metrics)
+
+        # 计算平均性能
+        if results:
+            avg_results = {}
+            for metric in ['precision', 'recall', 'ndcg', 'diversity']:
+                if all(metric in result for result in results):
+                    avg_results[metric] = {}
+                    for k in results[0][metric]:
+                        avg_results[metric][k] = np.mean([result[metric][k] for result in results])
+
+            if 'coverage' in results[0]:
+                avg_results['coverage'] = np.mean([result['coverage'] for result in results])
+
+            logger.info("Cross validation average results:")
+            for metric in ['precision', 'recall', 'ndcg', 'diversity']:
+                logger.info(f"{metric.capitalize()}:")
+                for k, value in avg_results[metric].items():
+                    logger.info(f"  @{k}: {value:.4f}")
+
+            logger.info(f"Coverage: {avg_results['coverage']:.4f}")
+
+            return avg_results
+
+        return None
