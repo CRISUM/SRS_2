@@ -23,6 +23,7 @@ from models.knn_model import KNNModel
 from models.svd_model import SVDModel
 from models.sequence_model import SequenceRecommender
 from models.hybrid_model import HybridRecommender
+from models.content_model import ContentBasedModel
 from evaluation.evaluator import RecommenderEvaluator
 from visualization.visualizer import RecommenderVisualizer
 
@@ -51,7 +52,7 @@ class SteamRecommender:
                 'epochs': 10
             },
             'knn_params': {
-                'user_neighbors': 20,
+                'user_neighbors': 30,
                 'item_neighbors': 20,
                 'metric': 'cosine',
                 'algorithm': 'brute',
@@ -67,9 +68,9 @@ class SteamRecommender:
             'n_recommendations': 10,
             'user_knn_weight': 0.25,
             'item_knn_weight': 0.25,
-            'svd_weight': 0.2,
-            'content_weight': 0.15,
-            'sequence_weight': 0.15,
+            'svd_weight': 0.25,
+            'content_weight': 0.125,
+            'sequence_weight': 0.125,
             'use_gpu': torch.cuda.is_available()
         }
 
@@ -231,11 +232,30 @@ class SteamRecommender:
             else:
                 logger.warning("Sequence feature columns not found, skipping sequence model training")
 
-            # 4. Create content-based similarity matrix
-            logger.info("Creating content-based similarity matrix...")
+            # 4. Create content-based model
+            logger.info("Creating content-based model...")
             self.feature_extractor.create_game_embeddings(train_df)
             content_sim = self.feature_extractor.get_similarity_matrix(self.feature_extractor.game_embeddings)
-            self.models['content'] = content_sim
+            content_model = ContentBasedModel(content_sim)
+
+            # Extract user preferences from training data for content-based model
+            logger.info("Extracting user preferences for content-based model...")
+            user_preferences = {}
+            for user_id in train_df['user_id'].unique():
+                user_data = train_df[train_df['user_id'] == user_id]
+                # Get user's positively rated items
+                if 'is_recommended' in user_data.columns:
+                    positive_items = user_data[user_data['is_recommended'] == True]['app_id'].tolist()
+                    user_preferences[user_id] = positive_items
+
+            # Set user preferences in content model
+            content_model.user_preferences = user_preferences
+
+            # Set popular items for cold start
+            popular_games = self.get_popular_games(20)
+            content_model.popular_items = popular_games
+
+            self.models['content'] = content_model
 
             # 5. Create hybrid recommender
             if all(model is not None for model in self.models.values()):
@@ -478,10 +498,9 @@ class SteamRecommender:
             # Content model
             content_dir = os.path.join(models_dir, 'content')
             if os.path.exists(content_dir):
-                # For content similarity matrix, load directly
-                with open(os.path.join(content_dir, 'content_similarity.pkl'), 'rb') as f:
-                    content_sim = pickle.load(f)
-                self.models['content'] = content_sim
+                content_model = ContentBasedModel()
+                content_model.load(content_dir)
+                self.models['content'] = content_model
 
             # Load game embeddings if available
             embeddings_path = os.path.join(path, 'game_embeddings.pkl')

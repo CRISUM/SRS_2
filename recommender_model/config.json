@@ -9,7 +9,7 @@
     "epochs": 10
   },
   "knn_params": {
-    "user_neighbors": 20,
+    "user_neighbors": 30,
     "item_neighbors": 20,
     "metric": "cosine",
     "algorithm": "brute"
@@ -25,8 +25,8 @@
   "n_recommendations": 10,
   "user_knn_weight": 0.25,
   "item_knn_weight": 0.25,
-  "svd_weight": 0.2,
-  "content_weight": 0.15,
-  "sequence_weight": 0.15,
+  "svd_weight": 0.25,
+  "content_weight": 0.125,
+  "sequence_weight": 0.125,
   "use_gpu": false
 }
