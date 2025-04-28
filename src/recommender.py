@@ -187,69 +187,31 @@ class SteamRecommender:
             svd_model.fit(train_df)
             self.models['svd'] = svd_model
 
-            # 3. Train sequence model
-            logger.info("Training sequence model...")
-            # Prepare sequence features
-            if hasattr(self.data_processor, 'sequence_feature_columns'):
-                sequence_features = self.data_processor.sequence_feature_columns
+            # 3. Train game sequence model (replacing the user sequence model)
+            logger.info("Training game sequence model...")
+            # Create game sequence model optimized for sparse data
+            from models.sequence_model import SequenceRecommender
+            game_seq_model = SequenceRecommender(
+                hidden_dim=self.config['sequence_params']['hidden_dim'],
+                num_layers=self.config['sequence_params']['num_layers'],
+                dropout=self.config['sequence_params']['dropout'],
+                learning_rate=self.config['sequence_params']['learning_rate'],
+                batch_size=self.config['sequence_params']['batch_size'],
+                epochs=self.config['sequence_params']['epochs'],
+                device=self.device
+            )
+            # Pass the DataFrame directly to utilize game-to-game transitions
+            game_seq_model.fit(train_df)
+            self.models['sequence'] = game_seq_model
 
-                # Extract features and targets
-                X = train_df[sequence_features].values
-                y = train_df['is_recommended'].astype(float).values
-
-                # Prepare user data dictionary
-                user_data = {}
-                for user_id in train_df['user_id'].unique():
-                    user_items = train_df[train_df['user_id'] == user_id]['app_id'].tolist()
-                    user_data[user_id] = {'items': user_items}
-
-                # Prepare item data dictionary
-                item_data = {}
-                for app_id in train_df['app_id'].unique():
-                    item_data[app_id] = {'id': app_id}
-
-                # Prepare training data for sequence model
-                sequence_data = {
-                    'X': X,
-                    'y': y,
-                    'feature_columns': sequence_features,
-                    'user_data': user_data,
-                    'item_data': item_data
-                }
-
-                # Initialize and train sequence model
-                sequence_model = SequenceRecommender(
-                    hidden_dim=self.config['sequence_params']['hidden_dim'],
-                    num_layers=self.config['sequence_params']['num_layers'],
-                    dropout=self.config['sequence_params']['dropout'],
-                    learning_rate=self.config['sequence_params']['learning_rate'],
-                    batch_size=self.config['sequence_params']['batch_size'],
-                    epochs=self.config['sequence_params']['epochs'],
-                    device=self.device
-                )
-                sequence_model.fit(sequence_data)
-                self.models['sequence'] = sequence_model
-            else:
-                logger.warning("Sequence feature columns not found, skipping sequence model training")
-
-            # 4. Create content-based model
-            logger.info("Creating content-based model...")
+            # 4. Create enhanced content-based model
+            logger.info("Creating enhanced content-based model...")
             self.feature_extractor.create_game_embeddings(train_df)
             content_sim = self.feature_extractor.get_similarity_matrix(self.feature_extractor.game_embeddings)
             content_model = ContentBasedModel(content_sim)
 
-            # Extract user preferences from training data for content-based model
-            logger.info("Extracting user preferences for content-based model...")
-            user_preferences = {}
-            for user_id in train_df['user_id'].unique():
-                user_data = train_df[train_df['user_id'] == user_id]
-                # Get user's positively rated items
-                if 'is_recommended' in user_data.columns:
-                    positive_items = user_data[user_data['is_recommended'] == True]['app_id'].tolist()
-                    user_preferences[user_id] = positive_items
-
-            # Set user preferences in content model
-            content_model.user_preferences = user_preferences
+            # Use better dataset for content-based model
+            content_model.fit(train_df)
 
             # Set popular items for cold start
             popular_games = self.get_popular_games(20)
@@ -257,22 +219,39 @@ class SteamRecommender:
 
             self.models['content'] = content_model
 
-            # 5. Create hybrid recommender
+            # 5. Create hybrid recommender with adjusted weights for sparse data
             if all(model is not None for model in self.models.values()):
-                logger.info("Creating hybrid recommender...")
+                logger.info("Creating hybrid recommender with optimized weights...")
+
+                # Adjust weights for sparse data - increase weight for content and item-based models
+                # Reduce weight for user-based models that need rich user history
                 model_weights = {
-                    'user_knn': self.config['user_knn_weight'],
-                    'item_knn': self.config['item_knn_weight'],
-                    'svd': self.config['svd_weight'],
-                    'sequence': self.config['sequence_weight'],
-                    'content': self.config['content_weight']
+                    'user_knn': self.config.get('user_knn_weight', 0.15),  # Reduced from 0.25
+                    'item_knn': self.config.get('item_knn_weight', 0.30),  # Increased from 0.25
+                    'svd': self.config.get('svd_weight', 0.20),  # Reduced from 0.25
+                    'sequence': self.config.get('sequence_weight', 0.15),  # Increased from 0.125
+                    'content': self.config.get('content_weight', 0.20)  # Increased from 0.125
                 }
 
                 self.hybrid_model = HybridRecommender(self.models, model_weights)
 
-                # 6. Prepare popular items for cold start
-                popular_games = self.get_popular_games(20)
+                # 6. Prepare enhanced popular items for cold start
+                popular_games = self.get_popular_games(50)  # Get more for better diversity
                 self.hybrid_model.popular_items = popular_games
+
+                # 7. Configure hybrid model for better diversity and coverage
+                if hasattr(self.hybrid_model, 'config'):
+                    self.hybrid_model.config = self.config
+                else:
+                    setattr(self.hybrid_model, 'config', self.config)
+
+                # Set diversity settings if not already present
+                if not hasattr(self.hybrid_model, 'diversity_factor'):
+                    self.hybrid_model.diversity_factor = 0.3
+
+                # Enable caching for performance
+                if not hasattr(self.hybrid_model, 'enable_cache'):
+                    self.hybrid_model.enable_cache = True
 
                 logger.info("All models trained successfully")
                 return True
@@ -798,5 +777,294 @@ class SteamRecommender:
                 return False
         except Exception as e:
             logger.error(f"Error in incremental update: {str(e)}")
+            logger.error(traceback.format_exc())
+            return False
+
+    def enhance_content_model(self):
+        """增强基于内容的推荐模型"""
+        logger.info("Enhancing content-based recommendation model...")
+
+        try:
+            # 检查是否有训练数据
+            if not hasattr(self.data_processor, 'train_df') or self.data_processor.train_df is None:
+                logger.error("No training data available for enhancing content model")
+                return False
+
+            # 1. 提取更丰富的游戏特征
+            game_metadata = {}
+            for _, row in self.data_processor.train_df.drop_duplicates('app_id').iterrows():
+                game_id = row['app_id']
+
+                # 构建特征向量
+                features = {
+                    'tags': row.get('tags', '').split(',') if isinstance(row.get('tags', ''), str) else [],
+                    'title': row.get('title', f"Game {game_id}")
+                }
+
+                # 添加可选特征（如果存在）
+                for col in ['price_final', 'win', 'mac', 'linux', 'rating', 'positive_ratio', 'date_release']:
+                    if col in row and not pd.isna(row[col]):
+                        features[col] = row[col]
+
+                game_metadata[game_id] = features
+
+            # 2. 计算游戏相似度
+            from sklearn.feature_extraction.text import TfidfVectorizer
+            from sklearn.metrics.pairwise import cosine_similarity
+
+            # 准备标签文本
+            game_tags = {}
+            for game_id, metadata in game_metadata.items():
+                tags = metadata['tags']
+                game_tags[game_id] = ' '.join([tag.strip() for tag in tags]) if tags else ''
+
+            # 使用TF-IDF向量化游戏标签
+            vectorizer = TfidfVectorizer(min_df=1)
+            all_game_ids = list(game_tags.keys())
+            tag_texts = [game_tags[gid] for gid in all_game_ids]
+
+            # 检查是否有足够的数据
+            if len(tag_texts) > 1 and any(tag_texts):
+                tag_matrix = vectorizer.fit_transform(tag_texts)
+
+                # 计算游戏相似度
+                tag_similarity = cosine_similarity(tag_matrix)
+
+                # 创建游戏相似度字典
+                game_similarities = {}
+                for i, game_id in enumerate(all_game_ids):
+                    similar_games = [(all_game_ids[j], tag_similarity[i, j])
+                                     for j in range(len(all_game_ids)) if i != j]
+                    similar_games.sort(key=lambda x: x[1], reverse=True)
+                    game_similarities[game_id] = similar_games
+
+                # 增强内容模型
+                if 'content' in self.models:
+                    content_model = self.models['content']
+                    content_model.similarity_matrix = game_similarities
+                    content_model.item_metadata = game_metadata
+
+                    logger.info(f"Enhanced content model with {len(game_similarities)} game similarities")
+                    return True
+                else:
+                    logger.warning("Content model not found in models dictionary")
+                    return False
+            else:
+                logger.warning("Not enough tag data to create enhanced content model")
+                return False
+
+        except Exception as e:
+            logger.error(f"Error enhancing content model: {str(e)}")
+            logger.error(traceback.format_exc())
+            return False
+
+    def optimize_model_weights(self):
+        """优化模型权重以适应稀疏数据"""
+        logger.info("Optimizing model weights for sparse data...")
+
+        try:
+            if self.hybrid_model is None:
+                logger.error("No hybrid model available for weight optimization")
+                return False
+
+            # 检查是否有用户数据
+            has_user_data = self.data_processor.train_df['user_id'].nunique() > 0
+            if not has_user_data:
+                logger.warning("No user data found, cannot analyze sparsity")
+                return False
+
+            # 1. 分析数据稀疏度
+            user_counts = self.data_processor.train_df.groupby('user_id').size()
+
+            # 计算用户交互数据的统计指标
+            avg_user_interactions = user_counts.mean()
+            median_user_interactions = user_counts.median()
+            sparse_user_ratio = (user_counts <= 2).mean()  # 交互<=2的用户比例
+
+            logger.info(f"Data sparsity analysis: Avg={avg_user_interactions:.2f}, "
+                        f"Median={median_user_interactions:.2f}, "
+                        f"Sparse user ratio={sparse_user_ratio:.2f}")
+
+            # 2. 根据数据稀疏性调整权重
+            # 数据越稀疏，越偏向基于内容和物品的方法
+            # 数据越丰富，越偏向基于用户协同过滤的方法
+
+            # 基础权重配置
+            base_weights = {
+                'user_knn': 0.25,
+                'item_knn': 0.25,
+                'svd': 0.25,
+                'sequence': 0.125,
+                'content': 0.125
+            }
+
+            # 根据稀疏度调整权重
+            adjusted_weights = {}
+
+            # 非常稀疏（大多数用户只有1-2个交互）
+            if sparse_user_ratio > 0.7:
+                adjusted_weights = {
+                    'user_knn': 0.1,  # 降低基于用户的权重
+                    'item_knn': 0.35,  # 增加基于物品的权重
+                    'svd': 0.15,  # 降低SVD权重
+                    'sequence': 0.15,  # 保持序列模型权重
+                    'content': 0.25  # 大幅提高内容模型权重
+                }
+                logger.info("Applying weights for very sparse data")
+
+            # 中等稀疏（大约一半用户有少量交互）
+            elif sparse_user_ratio > 0.4:
+                adjusted_weights = {
+                    'user_knn': 0.15,  # 降低基于用户的权重
+                    'item_knn': 0.30,  # 增加基于物品的权重
+                    'svd': 0.20,  # 略微降低SVD权重
+                    'sequence': 0.15,  # 保持序列模型权重
+                    'content': 0.20  # 增加内容模型权重
+                }
+                logger.info("Applying weights for moderately sparse data")
+
+            # 数据较丰富
+            else:
+                adjusted_weights = {
+                    'user_knn': 0.25,  # 保持基于用户的权重
+                    'item_knn': 0.25,  # 保持基于物品的权重
+                    'svd': 0.25,  # 保持SVD权重
+                    'sequence': 0.15,  # 略微增加序列模型权重
+                    'content': 0.10  # 略微降低内容模型权重
+                }
+                logger.info("Applying weights for relatively rich data")
+
+            # 3. 更新混合模型权重
+            self.hybrid_model.weights = adjusted_weights
+
+            # 同时更新配置中的权重
+            for model_name, weight in adjusted_weights.items():
+                weight_key = f"{model_name}_weight"
+                self.config[weight_key] = weight
+
+            logger.info(f"Updated model weights: {adjusted_weights}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error optimizing model weights: {str(e)}")
+            logger.error(traceback.format_exc())
+            return False
+
+    def improve_diversity_and_coverage(self):
+        """提高推荐的多样性和覆盖率"""
+        logger.info("Improving recommendation diversity and coverage...")
+
+        try:
+            if self.hybrid_model is None:
+                logger.error("No hybrid model available for diversity improvement")
+                return False
+
+            # 1. 设置多样性因子
+            self.hybrid_model.diversity_factor = 0.3  # 0.3 的多样性权重在多样性和相关性之间取得平衡
+
+            # 2. 启用缓存以提高性能
+            self.hybrid_model.enable_cache = True
+
+            # 3. 增加冷启动策略中的多样性
+            # 已经在 get_cold_start_recommendations 中实现
+
+            # 4. 将配置传递给混合模型以便其能访问全局设置
+            if hasattr(self.hybrid_model, 'config'):
+                self.hybrid_model.config.update(self.config)
+            else:
+                setattr(self.hybrid_model, 'config', self.config)
+
+            # 5. 为物品多样性添加相关信息
+            if hasattr(self.data_processor, 'train_df') and 'tags' in self.data_processor.train_df.columns:
+                # 创建游戏标签字典
+                game_tags = {}
+                for _, row in self.data_processor.train_df.drop_duplicates('app_id').iterrows():
+                    if pd.notna(row['tags']) and row['tags']:
+                        tags = [tag.strip() for tag in str(row['tags']).split(',')]
+                        game_tags[row['app_id']] = set(tags)
+
+                # 传递给混合模型
+                if hasattr(self.hybrid_model, 'item_tags'):
+                    self.hybrid_model.item_tags.update(game_tags)
+                else:
+                    setattr(self.hybrid_model, 'item_tags', game_tags)
+
+            logger.info("Successfully configured diversity and coverage improvements")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error improving diversity and coverage: {str(e)}")
+            logger.error(traceback.format_exc())
+            return False
+
+    def train_and_optimize(self):
+        """训练并优化推荐系统，包括所有增强策略"""
+        logger.info("Training and optimizing the recommendation system...")
+
+        try:
+            # 1. 首先加载和处理数据
+            if not hasattr(self.data_processor, 'train_df') or self.data_processor.train_df is None:
+                success = self.load_data()
+                if not success:
+                    logger.error("Failed to load data")
+                    return False
+
+            # 2. 进行特征工程
+            success = self.engineer_features()
+            if not success:
+                logger.error("Failed to engineer features")
+                return False
+
+            # 3. 检查数据情况
+            train_df = self.data_processor.train_df
+
+            # 记录数据统计情况
+            user_count = train_df['user_id'].nunique()
+            item_count = train_df['app_id'].nunique()
+            interactions = len(train_df)
+
+            avg_interactions_per_user = interactions / user_count if user_count > 0 else 0
+            density = interactions / (user_count * item_count) if user_count > 0 and item_count > 0 else 0
+
+            logger.info(f"Data statistics: {user_count} users, {item_count} items, "
+                        f"{interactions} interactions")
+            logger.info(f"Average interactions per user: {avg_interactions_per_user:.2f}, "
+                        f"Matrix density: {density:.6f}")
+
+            # 4. 训练基础模型
+            success = self.train_models()
+            if not success:
+                logger.error("Failed to train models")
+                return False
+
+            # 5. 增强内容模型
+            self.enhance_content_model()
+
+            # 6. 优化模型权重
+            self.optimize_model_weights()
+
+            # 7. 增强多样性和覆盖率
+            self.improve_diversity_and_coverage()
+
+            # 8. 评估推荐质量
+            evaluation_results = self.evaluate_recommendations()
+            if evaluation_results:
+                logger.info("Recommendation system evaluation results:")
+                for metric in ['precision', 'recall', 'ndcg', 'diversity']:
+                    if metric in evaluation_results:
+                        for k, value in evaluation_results[metric].items():
+                            logger.info(f"{metric}@{k}: {value:.4f}")
+
+                if 'coverage' in evaluation_results:
+                    logger.info(f"Coverage: {evaluation_results['coverage']:.4f}")
+
+            # 9. 创建可视化结果
+            self.visualize_results()
+
+            logger.info("Recommendation system training and optimization completed successfully")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error in training and optimization process: {str(e)}")
             logger.error(traceback.format_exc())
             return False

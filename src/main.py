@@ -128,7 +128,7 @@ def main():
         elif args.data:
             recommender.load_data()
             recommender.engineer_features()
-            recommender.train_models()
+            recommender.train_and_optimize()
             recommender.save_model(args.save_model)
         else:
             logging.error("Service requires either model path or data file")

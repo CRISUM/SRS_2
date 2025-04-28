@@ -4,8 +4,9 @@
 """
 src/models/sequence_model.py - Sequential recommendation model
 Author: YourName
-Date: 2025-04-27
-Description: Implements deep learning based sequential recommendation model
+Date: 2025-04-29
+Description: Implements deep learning based game-to-game sequential recommendation model
+             Optimized for sparse user data by focusing on game associations
 """
 
 import torch
@@ -16,6 +17,8 @@ import pandas as pd
 import logging
 import os
 import pickle
+import traceback
+from collections import defaultdict
 
 from .base_model import BaseRecommenderModel
 
@@ -75,11 +78,13 @@ class GameSequenceModel(nn.Module):
 
 
 class SequenceRecommender(BaseRecommenderModel):
-    """Recommendation model using sequential user behavior"""
+    """Recommendation model using sequential game-to-game relationships
+       Addresses data sparsity by focusing on game associations rather than user sequences
+    """
 
     def __init__(self, hidden_dim=128, num_layers=2, dropout=0.2,
                  learning_rate=0.001, batch_size=64, epochs=10, device=None):
-        """Initialize sequence recommender"""
+        """Initialize game sequence recommender"""
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         self.dropout = dropout
@@ -90,106 +95,287 @@ class SequenceRecommender(BaseRecommenderModel):
         self.model = None
         self.feature_columns = None
         self.training_history = {'loss': []}
-        self.user_data = {}
-        self.item_data = {}
-        self.item_indices = {}
+
+        # Game data
+        self.game_data = {}
+        self.game_indices = {}
+
+        # Game sequences
+        self.game_sequences = defaultdict(list)  # Game -> List of next games
+        self.game_transitions = {}  # (game1, game2) -> count
+
+        # User histories for context
+        self.user_history = {}
+
+        # Popular games for fallback
+        self.popular_games = []
+
+        # Default features
         self.default_features = None
+
+    def _extract_game_sequences(self, df):
+        """Extract game-to-game transition sequences from user play histories
+
+        Args:
+            df (DataFrame): User-item interactions with user_id, app_id columns
+
+        Returns:
+            dict: Game transition counts
+        """
+        logger.info("Extracting game-to-game transitions from user histories...")
+
+        transitions = defaultdict(int)
+        sequences = defaultdict(list)
+        user_histories = {}
+
+        # Process each user's history to extract game transitions
+        for user_id in df['user_id'].unique():
+            user_data = df[df['user_id'] == user_id].copy()
+
+            # Sort by date if available, otherwise use default order
+            if 'date' in user_data.columns:
+                user_data = user_data.sort_values('date')
+
+            # Get sequence of games
+            user_games = user_data['app_id'].tolist()
+            user_histories[user_id] = user_games
+
+            # Skip if user has only one game
+            if len(user_games) <= 1:
+                continue
+
+            # Extract transitions between consecutive games
+            for i in range(len(user_games) - 1):
+                game1 = user_games[i]
+                game2 = user_games[i + 1]
+
+                transitions[(game1, game2)] += 1
+                sequences[game1].append(game2)
+
+        return transitions, sequences, user_histories
+
+    def _prepare_training_data(self, df, transitions):
+        """Prepare training data for the neural network
+
+        Args:
+            df (DataFrame): User-item interactions
+            transitions (dict): Game transition counts
+
+        Returns:
+            tuple: (feature_matrix, labels)
+        """
+        logger.info("Preparing training data from game transitions...")
+
+        # Collect features for training
+        game_features = {}
+        game_tags = {}
+
+        # Extract game metadata
+        for _, row in df.drop_duplicates('app_id').iterrows():
+            game_id = row['app_id']
+
+            # Extract tags if available
+            if 'tags' in row and pd.notna(row['tags']):
+                tags = [t.strip() for t in str(row['tags']).split(',')]
+                game_tags[game_id] = tags
+            else:
+                game_tags[game_id] = []
+
+            # Store basic game features
+            game_features[game_id] = {}
+
+            # Get hours if available
+            if 'hours' in df.columns:
+                avg_hours = df[df['app_id'] == game_id]['hours'].mean()
+                game_features[game_id]['avg_hours'] = avg_hours if not pd.isna(avg_hours) else 0
+
+            # Get recommendation ratio if available
+            if 'is_recommended' in df.columns:
+                rec_ratio = df[df['app_id'] == game_id]['is_recommended'].mean()
+                game_features[game_id]['rec_ratio'] = rec_ratio if not pd.isna(rec_ratio) else 0.5
+
+        # Convert tags to one-hot features
+        if game_tags:
+            # Find most common tags
+            tag_counter = defaultdict(int)
+            for tags in game_tags.values():
+                for tag in tags:
+                    tag_counter[tag] += 1
+
+            # Take top 50 tags
+            top_tags = sorted(tag_counter.items(), key=lambda x: x[1], reverse=True)[:50]
+            top_tag_set = {tag for tag, _ in top_tags}
+
+            # Create one-hot encoding
+            for game_id, tags in game_tags.items():
+                for tag in top_tag_set:
+                    game_features[game_id][f'tag_{tag}'] = 1 if tag in tags else 0
+
+        # Collect all feature keys
+        all_feature_keys = set()
+        for features in game_features.values():
+            all_feature_keys.update(features.keys())
+
+        # Convert to sorted list for consistent ordering
+        feature_columns = sorted(all_feature_keys)
+        self.feature_columns = feature_columns
+
+        # Prepare transition samples
+        X_samples = []
+        y_samples = []
+
+        # Process all possible game pairs
+        game_ids = list(game_features.keys())
+        for i, game1 in enumerate(game_ids):
+            for game2 in game_ids:
+                if game1 == game2:
+                    continue
+
+                # Create feature vector
+                feature_vector = []
+                for feature in feature_columns:
+                    # Get feature for game1
+                    game1_value = game_features[game1].get(feature, 0)
+
+                    # Get feature for game2
+                    game2_value = game_features[game2].get(feature, 0)
+
+                    # Add both values
+                    feature_vector.append(game1_value)
+                    feature_vector.append(game2_value)
+
+                    # Add interaction term (product)
+                    feature_vector.append(game1_value * game2_value)
+
+                # Create label from transition count
+                count = transitions.get((game1, game2), 0)
+                label = 1.0 if count > 0 else 0.0
+
+                X_samples.append(feature_vector)
+                y_samples.append(label)
+
+        # Convert to numpy arrays
+        X = np.array(X_samples)
+        y = np.array(y_samples)
+
+        logger.info(f"Prepared {len(X)} training samples with {X.shape[1]} features")
+        return X, y
 
     def fit(self, data):
         """Train the model with provided data
 
         Args:
-            data (dict): Dictionary containing training data with keys:
-                         'X': feature matrix
-                         'y': target values
-                         'feature_columns': list of feature column names
-                         'user_data': optional user data dictionary
-                         'item_data': optional item data dictionary
+            data (DataFrame or dict): Training data
 
         Returns:
             self: Trained model
         """
-        logger.info("Training sequence model...")
+        logger.info("Training game sequence model...")
 
-        if not isinstance(data, dict) or 'X' not in data or 'y' not in data:
-            raise ValueError("Data must be a dictionary with 'X' and 'y' keys")
+        try:
+            # Handle different input formats
+            if isinstance(data, dict) and 'df' in data:
+                df = data['df']
+            elif isinstance(data, pd.DataFrame):
+                df = data
+            else:
+                logger.error("Invalid input data format")
+                return self
 
-        X = data['X']
-        y = data['y']
+            # Extract game transitions from user histories
+            transitions, sequences, user_histories = self._extract_game_sequences(df)
+            self.game_transitions = transitions
+            self.game_sequences = sequences
+            self.user_history = user_histories
 
-        # Store feature columns
-        if 'feature_columns' in data:
-            self.feature_columns = data['feature_columns']
+            # Get popular games for fallback
+            game_counts = df['app_id'].value_counts()
+            self.popular_games = [(game_id, count / len(df['user_id'].unique()))
+                                  for game_id, count in game_counts.items()]
+            self.popular_games.sort(key=lambda x: x[1], reverse=True)
 
-        # Store user and item data if provided
-        if 'user_data' in data:
-            self.user_data = data['user_data']
+            # Prepare training data
+            X, y = self._prepare_training_data(df, transitions)
 
-        if 'item_data' in data:
-            self.item_data = data['item_data']
-            self.item_indices = {item_id: i for i, item_id in enumerate(self.item_data)}
+            # Check if we have enough transitions for training
+            if len(transitions) < 10 or X.shape[0] < 100:
+                logger.warning("Not enough game transitions for neural model training")
+                # Still store the transitions for rule-based recommendations
+                return self
 
-        # Initialize model
-        input_size = X.shape[1]
-        self.model = GameSequenceModel(
-            num_features=input_size,
-            hidden_dim=self.hidden_dim,
-            num_layers=self.num_layers,
-            dropout=self.dropout
-        ).to(self.device)
+            # Save for updating game data dictionary
+            for game_id in df['app_id'].unique():
+                self.game_data[game_id] = {'id': game_id}
+                self.game_indices[game_id] = len(self.game_indices)
 
-        # Setup optimizer and loss function
-        optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
-        criterion = nn.BCELoss()
+            # Initialize neural network model
+            input_size = X.shape[1]
+            self.model = GameSequenceModel(
+                num_features=input_size,
+                hidden_dim=self.hidden_dim,
+                num_layers=self.num_layers,
+                dropout=self.dropout
+            ).to(self.device)
 
-        # Convert to tensors
-        X_tensor = torch.FloatTensor(X).to(self.device)
-        y_tensor = torch.FloatTensor(y).to(self.device)
+            # Setup optimizer and loss function
+            optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
+            criterion = nn.BCELoss()
 
-        # Training loop
-        self.model.train()
-        for epoch in range(self.epochs):
-            # Mini-batch training
-            total_loss = 0
-            num_batches = 0
+            # Convert to tensors
+            X_tensor = torch.FloatTensor(X).to(self.device)
+            y_tensor = torch.FloatTensor(y).to(self.device)
 
-            # Create random permutation for shuffling
-            indices = torch.randperm(len(X_tensor))
+            # Training loop
+            self.model.train()
+            for epoch in range(self.epochs):
+                # Mini-batch training
+                total_loss = 0
+                num_batches = 0
 
-            for i in range(0, len(X_tensor), self.batch_size):
-                # Get batch indices
-                batch_indices = indices[i:i + self.batch_size]
+                # Create random permutation for shuffling
+                indices = torch.randperm(len(X_tensor))
 
-                # Get batch
-                X_batch = X_tensor[batch_indices]
-                y_batch = y_tensor[batch_indices]
+                for i in range(0, len(X_tensor), self.batch_size):
+                    # Get batch indices
+                    batch_indices = indices[i:i + self.batch_size]
 
-                # Forward pass
-                optimizer.zero_grad()
-                outputs = self.model(X_batch)
+                    # Get batch
+                    X_batch = X_tensor[batch_indices]
+                    y_batch = y_tensor[batch_indices]
 
-                # Calculate loss
-                loss = criterion(outputs, y_batch)
-                total_loss += loss.item()
+                    # Forward pass
+                    optimizer.zero_grad()
+                    outputs = self.model(X_batch)
 
-                # Backward pass
-                loss.backward()
-                optimizer.step()
+                    # Calculate loss
+                    loss = criterion(outputs, y_batch)
+                    total_loss += loss.item()
 
-                num_batches += 1
+                    # Backward pass
+                    loss.backward()
+                    optimizer.step()
 
-            # Calculate average loss for epoch
-            epoch_loss = total_loss / num_batches
-            self.training_history['loss'].append(epoch_loss)
-            logger.info(f"Epoch {epoch + 1}/{self.epochs}, Loss: {epoch_loss:.4f}")
+                    num_batches += 1
 
-        # Save default feature vector for cold start
-        self.default_features = np.mean(X, axis=0)
+                # Calculate average loss for epoch
+                epoch_loss = total_loss / num_batches if num_batches > 0 else 0
+                self.training_history['loss'].append(epoch_loss)
+                logger.info(f"Epoch {epoch + 1}/{self.epochs}, Loss: {epoch_loss:.4f}")
 
-        # Set model to evaluation mode
-        self.model.eval()
-        logger.info("Sequence model training completed")
-        return self
+            # Save default feature vector for cold start
+            self.default_features = np.mean(X, axis=0)
+
+            # Set model to evaluation mode
+            if self.model:
+                self.model.eval()
+
+            logger.info("Game sequence model training completed")
+            return self
+
+        except Exception as e:
+            logger.error(f"Error training game sequence model: {str(e)}")
+            logger.error(traceback.format_exc())
+            return self
 
     def predict(self, user_id, item_id):
         """Predict rating for a user-item pair
@@ -201,25 +387,65 @@ class SequenceRecommender(BaseRecommenderModel):
         Returns:
             float: Predicted rating (0-1 scale)
         """
-        if self.model is None:
-            logger.warning("Model not trained yet")
-            return 0.5
-
         try:
-            # Extract features for prediction
-            features = self.extract_features(user_id, item_id)
+            # Check if we have user history
+            if user_id not in self.user_history or not self.user_history[user_id]:
+                # Fall back to popularity
+                for game_id, popularity in self.popular_games:
+                    if game_id == item_id:
+                        return min(0.9, popularity)
+                return 0.5
 
-            # Convert to tensor
-            features_tensor = torch.FloatTensor(features).unsqueeze(0).to(self.device)
+            # Get user's most recent games (up to 3)
+            user_games = self.user_history[user_id][-3:]
 
-            # Make prediction
-            self.model.eval()
-            with torch.no_grad():
-                prediction = self.model(features_tensor).item()
+            # Check for direct transitions
+            transition_scores = []
+            for game in user_games:
+                count = self.game_transitions.get((game, item_id), 0)
+                if count > 0:
+                    # Scale transition count
+                    transition_scores.append(min(0.9, 0.5 + 0.1 * count))
 
-            return prediction
+            # If we have transition scores, use the maximum
+            if transition_scores:
+                return max(transition_scores)
+
+            # If we have a neural model, try using it
+            if self.model is not None and hasattr(self, 'feature_columns') and self.feature_columns:
+                # Try the neural model for the most recent game
+                recent_game = user_games[-1]
+
+                try:
+                    # Extract features
+                    features = self._extract_game_pair_features(recent_game, item_id)
+
+                    # Convert to tensor
+                    features_tensor = torch.FloatTensor(features).unsqueeze(0).to(self.device)
+
+                    # Make prediction
+                    with torch.no_grad():
+                        prediction = self.model(features_tensor).item()
+
+                    return prediction
+                except Exception as e:
+                    logger.debug(f"Neural prediction error: {str(e)}")
+
+            # Fall back to rule-based score
+            for game_id, sequence in self.game_sequences.items():
+                if item_id in sequence and game_id in user_games:
+                    return 0.7  # There is some association
+
+            # No associations found, use popularity as fallback
+            for game_id, popularity in self.popular_games:
+                if game_id == item_id:
+                    return min(0.7, 0.3 + 0.4 * popularity)
+
+            return 0.5  # Default score
+
         except Exception as e:
-            logger.error(f"Error in sequence model prediction: {str(e)}")
+            logger.error(f"Error in game sequence prediction: {str(e)}")
+            logger.error(traceback.format_exc())
             return 0.5
 
     def recommend(self, user_id, n=10):
@@ -232,139 +458,290 @@ class SequenceRecommender(BaseRecommenderModel):
         Returns:
             list: List of (item_id, score) tuples
         """
-        if self.model is None:
-            logger.warning("Model not trained yet")
-            return []
-
         try:
-            # Get all possible items
-            if self.item_data:
-                candidate_items = list(self.item_data.keys())
-            elif self.item_indices:
-                candidate_items = list(self.item_indices.keys())
-            else:
-                logger.warning("No item data available for recommendations")
-                return []
+            # Check if user has history
+            if user_id not in self.user_history or not self.user_history[user_id]:
+                logger.info(f"No history for user {user_id}, using popular items")
+                return self.popular_games[:n]
 
-            # Get user's existing items to filter them out
-            user_items = set()
-            if user_id in self.user_data and 'items' in self.user_data[user_id]:
-                user_items = set(self.user_data[user_id]['items'])
+            # Get user's history
+            user_games = self.user_history[user_id]
 
-            # Calculate scores for all candidate items
-            item_scores = []
-            for item_id in candidate_items:
-                # Skip already seen items
-                if item_id in user_items:
-                    continue
+            # Focus on recent games (last 3)
+            recent_games = user_games[-3:] if len(user_games) > 3 else user_games
 
-                # Predict score
-                score = self.predict(user_id, item_id)
-                item_scores.append((item_id, score))
+            # Collect candidate items from transitions
+            candidates = {}
 
-            # Sort by score in descending order
-            item_scores.sort(key=lambda x: x[1], reverse=True)
+            # Try direct transitions first
+            for game in recent_games:
+                # Add games that frequently follow this game
+                for next_game in self.game_sequences.get(game, []):
+                    # Skip games user already has
+                    if next_game in user_games:
+                        continue
 
-            # Return top N
-            return item_scores[:n]
+                    # Calculate transition score
+                    transition_count = self.game_transitions.get((game, next_game), 0)
+                    score = min(0.9, 0.5 + 0.1 * transition_count)
+
+                    # Update with highest score
+                    if next_game in candidates:
+                        candidates[next_game] = max(candidates[next_game], score)
+                    else:
+                        candidates[next_game] = score
+
+            # If not enough candidates, try neural model predictions
+            if self.model is not None and (len(candidates) < n * 2):
+                # Get most recent game
+                recent_game = recent_games[-1]
+
+                # Try neural predictions for all possible games
+                for game_id in self.game_data:
+                    # Skip games user already has or already in candidates
+                    if game_id in user_games or game_id in candidates:
+                        continue
+
+                    try:
+                        # Extract features
+                        features = self._extract_game_pair_features(recent_game, game_id)
+
+                        # Convert to tensor
+                        features_tensor = torch.FloatTensor(features).unsqueeze(0).to(self.device)
+
+                        # Make prediction
+                        with torch.no_grad():
+                            prediction = self.model(features_tensor).item()
+
+                        # Only add if prediction is significant
+                        if prediction > 0.6:
+                            candidates[game_id] = prediction
+                    except Exception as e:
+                        continue  # Skip errors in neural prediction
+
+            # If still not enough candidates, add popular games
+            if len(candidates) < n:
+                for game_id, popularity in self.popular_games:
+                    if game_id not in user_games and game_id not in candidates:
+                        candidates[game_id] = 0.3 + (0.4 * popularity)  # Lower score for popular recommendations
+
+                        if len(candidates) >= n * 1.5:
+                            break
+
+            # Sort candidates by score
+            sorted_candidates = sorted(candidates.items(), key=lambda x: x[1], reverse=True)
+
+            # Add diversity: ensure we don't recommend too many similar games
+            # Select top N ensuring diversity
+            selected = []
+            selected_ids = set()
+
+            for game_id, score in sorted_candidates:
+                # Skip if we've selected enough
+                if len(selected) >= n:
+                    break
+
+                # Check if too similar to already selected games
+                too_similar = False
+                for sel_id, _ in selected:
+                    # Check transition relationship
+                    if ((sel_id, game_id) in self.game_transitions or
+                            (game_id, sel_id) in self.game_transitions):
+                        # If direct transition exists, might be too similar
+                        too_similar = True
+                        break
+
+                # Add if not too similar or if we need more recommendations
+                if not too_similar or len(selected) < n / 2:
+                    selected.append((game_id, score))
+                    selected_ids.add(game_id)
+
+            # If we don't have enough diverse recommendations, add more from candidates
+            if len(selected) < n:
+                for game_id, score in sorted_candidates:
+                    if game_id not in selected_ids:
+                        selected.append((game_id, score))
+                        selected_ids.add(game_id)
+
+                        if len(selected) >= n:
+                            break
+
+            return selected
+
         except Exception as e:
-            logger.error(f"Error in sequence model recommendation: {str(e)}")
-            return []
+            logger.error(f"Error in game sequence recommendation: {str(e)}")
+            logger.error(traceback.format_exc())
+            return self.popular_games[:n]
+
+    def _extract_game_pair_features(self, game1, game2):
+        """Extract features for a pair of games
+
+        Args:
+            game1: First game ID
+            game2: Second game ID
+
+        Returns:
+            array: Feature vector
+        """
+        # If no feature columns defined, return default features
+        if not self.feature_columns or self.default_features is None:
+            logger.warning("No feature columns defined, using defaults")
+            return self.default_features if self.default_features is not None else np.zeros(self.model.input_size)
+
+        # Get game data
+        game1_data = self.game_data.get(game1, {})
+        game2_data = self.game_data.get(game2, {})
+
+        # Create feature vector
+        feature_vector = []
+        for feature in self.feature_columns:
+            # Get feature for game1
+            game1_value = game1_data.get(feature, 0)
+
+            # Get feature for game2
+            game2_value = game2_data.get(feature, 0)
+
+            # Add both values
+            feature_vector.append(game1_value)
+            feature_vector.append(game2_value)
+
+            # Add interaction term (product)
+            feature_vector.append(game1_value * game2_value)
+
+        return np.array(feature_vector)
 
     def update(self, new_data):
         """Update model with new data (incremental learning)
 
         Args:
-            new_data (dict): Dictionary containing new training data with keys:
-                            'X': feature matrix
-                            'y': target values
-                            'feature_columns': optional list of feature column names
-                            'user_data': optional user data dictionary update
-                            'item_data': optional item data dictionary update
+            new_data (DataFrame or dict): New data for updating
 
         Returns:
             self: Updated model
         """
-        logger.info("Updating sequence model...")
+        logger.info("Updating game sequence model...")
 
-        if not isinstance(new_data, dict) or 'X' not in new_data or 'y' not in new_data:
-            raise ValueError("New data must be a dictionary with 'X' and 'y' keys")
+        try:
+            # Handle different input formats
+            if isinstance(new_data, dict) and 'df' in new_data:
+                df = new_data['df']
+            elif isinstance(new_data, pd.DataFrame):
+                df = new_data
+            else:
+                logger.error("Invalid input data format for update")
+                return self
 
-        X = new_data['X']
-        y = new_data['y']
+            # Extract new transitions
+            new_transitions, new_sequences, new_user_histories = self._extract_game_sequences(df)
 
-        # Update feature columns if provided
-        if 'feature_columns' in new_data:
-            self.feature_columns = new_data['feature_columns']
+            # Update user histories
+            for user_id, history in new_user_histories.items():
+                if user_id in self.user_history:
+                    # Append new history (maintaining order)
+                    self.user_history[user_id].extend(history)
+                else:
+                    # Create new history
+                    self.user_history[user_id] = history
 
-        # Update user and item data if provided
-        if 'user_data' in new_data:
-            self.user_data.update(new_data['user_data'])
+            # Update game transitions
+            for (game1, game2), count in new_transitions.items():
+                self.game_transitions[(game1, game2)] = self.game_transitions.get((game1, game2), 0) + count
 
-        if 'item_data' in new_data:
-            self.item_data.update(new_data['item_data'])
-            self.item_indices = {item_id: i for i, item_id in enumerate(self.item_data)}
+            # Update game sequences
+            for game, next_games in new_sequences.items():
+                self.game_sequences[game].extend(next_games)
 
-        # Check if model exists
-        if self.model is None:
-            # Train from scratch
-            return self.fit(new_data)
+            # Update game data and indices
+            for game_id in df['app_id'].unique():
+                if game_id not in self.game_data:
+                    self.game_data[game_id] = {'id': game_id}
+                    self.game_indices[game_id] = len(self.game_indices)
 
-        # Setup optimizer and loss function
-        optimizer = optim.Adam(self.model.parameters(),
-                               lr=self.learning_rate * 0.5)  # Lower learning rate for fine-tuning
-        criterion = nn.BCELoss()
+            # Update popular games
+            game_counts = df['app_id'].value_counts()
+            new_popular = [(game_id, count / len(df['user_id'].unique()))
+                           for game_id, count in game_counts.items()]
 
-        # Convert to tensors
-        X_tensor = torch.FloatTensor(X).to(self.device)
-        y_tensor = torch.FloatTensor(y).to(self.device)
+            # Merge with existing popular games (weighted average)
+            popular_dict = dict(self.popular_games)
+            for game_id, score in new_popular:
+                if game_id in popular_dict:
+                    # Update with 70% weight to new data
+                    popular_dict[game_id] = 0.3 * popular_dict[game_id] + 0.7 * score
+                else:
+                    popular_dict[game_id] = score
 
-        # Fine-tuning loop (fewer epochs)
-        update_epochs = max(2, self.epochs // 3)  # Fewer epochs for update
+            # Convert back to sorted list
+            self.popular_games = sorted(popular_dict.items(), key=lambda x: x[1], reverse=True)
 
-        self.model.train()
-        for epoch in range(update_epochs):
-            # Mini-batch training
-            total_loss = 0
-            num_batches = 0
+            # Retrain neural model if we have a significant amount of new data
+            if len(new_transitions) >= 20 and self.model is not None:
+                # Prepare training data from all transitions
+                X, y = self._prepare_training_data(df, self.game_transitions)
 
-            # Create random permutation for shuffling
-            indices = torch.randperm(len(X_tensor))
+                # Fine-tune model
+                X_tensor = torch.FloatTensor(X).to(self.device)
+                y_tensor = torch.FloatTensor(y).to(self.device)
 
-            for i in range(0, len(X_tensor), self.batch_size):
-                # Get batch indices
-                batch_indices = indices[i:i + self.batch_size]
+                # Setup optimizer with lower learning rate
+                optimizer = optim.Adam(
+                    self.model.parameters(),
+                    lr=self.learning_rate * 0.5  # Reduced learning rate for fine-tuning
+                )
+                criterion = nn.BCELoss()
 
-                # Get batch
-                X_batch = X_tensor[batch_indices]
-                y_batch = y_tensor[batch_indices]
+                # Training loop (fewer epochs)
+                update_epochs = max(2, self.epochs // 3)
 
-                # Forward pass
-                optimizer.zero_grad()
-                outputs = self.model(X_batch)
+                self.model.train()
+                for epoch in range(update_epochs):
+                    # Mini-batch training
+                    total_loss = 0
+                    num_batches = 0
 
-                # Calculate loss
-                loss = criterion(outputs, y_batch)
-                total_loss += loss.item()
+                    # Create random permutation for shuffling
+                    indices = torch.randperm(len(X_tensor))
 
-                # Backward pass
-                loss.backward()
-                optimizer.step()
+                    for i in range(0, len(X_tensor), self.batch_size):
+                        # Get batch indices
+                        batch_indices = indices[i:i + self.batch_size]
 
-                num_batches += 1
+                        # Get batch
+                        X_batch = X_tensor[batch_indices]
+                        y_batch = y_tensor[batch_indices]
 
-            # Calculate average loss for epoch
-            epoch_loss = total_loss / num_batches
-            self.training_history['loss'].append(epoch_loss)
-            logger.info(f"Update epoch {epoch + 1}/{update_epochs}, Loss: {epoch_loss:.4f}")
+                        # Forward pass
+                        optimizer.zero_grad()
+                        outputs = self.model(X_batch)
 
-        # Update default feature vector
-        self.default_features = (self.default_features + np.mean(X, axis=0)) / 2
+                        # Calculate loss
+                        loss = criterion(outputs, y_batch)
+                        total_loss += loss.item()
 
-        # Set model to evaluation mode
-        self.model.eval()
-        logger.info("Sequence model update completed")
-        return self
+                        # Backward pass
+                        loss.backward()
+                        optimizer.step()
+
+                        num_batches += 1
+
+                    # Record loss
+                    epoch_loss = total_loss / num_batches if num_batches > 0 else 0
+                    self.training_history['loss'].append(epoch_loss)
+                    logger.info(f"Update epoch {epoch + 1}/{update_epochs}, Loss: {epoch_loss:.4f}")
+
+                # Update default features
+                self.default_features = np.mean(X, axis=0)
+
+                # Set model to evaluation mode
+                self.model.eval()
+
+            logger.info("Game sequence model updated successfully")
+            return self
+
+        except Exception as e:
+            logger.error(f"Error updating game sequence model: {str(e)}")
+            logger.error(traceback.format_exc())
+            return self
 
     def save(self, path):
         """Save model to disk
@@ -375,13 +752,33 @@ class SequenceRecommender(BaseRecommenderModel):
         Returns:
             bool: Success
         """
-        logger.info(f"Saving sequence model to {path}")
-
-        os.makedirs(path, exist_ok=True)
+        logger.info(f"Saving game sequence model to {path}")
 
         try:
-            # Save model state dict
-            torch.save(self.model.state_dict(), os.path.join(path, 'sequence_model.pt'))
+            os.makedirs(path, exist_ok=True)
+
+            # Save model state dict if we have a neural model
+            if self.model is not None:
+                torch.save(self.model.state_dict(), os.path.join(path, 'sequence_model.pt'))
+
+            # Save game data
+            with open(os.path.join(path, 'game_transitions.pkl'), 'wb') as f:
+                pickle.dump(self.game_transitions, f)
+
+            with open(os.path.join(path, 'game_sequences.pkl'), 'wb') as f:
+                pickle.dump(dict(self.game_sequences), f)
+
+            with open(os.path.join(path, 'game_data.pkl'), 'wb') as f:
+                pickle.dump(self.game_data, f)
+
+            with open(os.path.join(path, 'game_indices.pkl'), 'wb') as f:
+                pickle.dump(self.game_indices, f)
+
+            with open(os.path.join(path, 'user_history.pkl'), 'wb') as f:
+                pickle.dump(self.user_history, f)
+
+            with open(os.path.join(path, 'popular_games.pkl'), 'wb') as f:
+                pickle.dump(self.popular_games, f)
 
             # Save model metadata
             metadata = {
@@ -399,18 +796,12 @@ class SequenceRecommender(BaseRecommenderModel):
             with open(os.path.join(path, 'sequence_metadata.pkl'), 'wb') as f:
                 pickle.dump(metadata, f)
 
-            # Save user and item data
-            with open(os.path.join(path, 'sequence_data.pkl'), 'wb') as f:
-                pickle.dump({
-                    'user_data': self.user_data,
-                    'item_data': self.item_data,
-                    'item_indices': self.item_indices
-                }, f)
-
-            logger.info("Sequence model saved successfully")
+            logger.info("Game sequence model saved successfully")
             return True
+
         except Exception as e:
-            logger.error(f"Error saving sequence model: {str(e)}")
+            logger.error(f"Error saving game sequence model: {str(e)}")
+            logger.error(traceback.format_exc())
             return False
 
     def load(self, path):
@@ -422,7 +813,7 @@ class SequenceRecommender(BaseRecommenderModel):
         Returns:
             self: Loaded model
         """
-        logger.info(f"Loading sequence model from {path}")
+        logger.info(f"Loading game sequence model from {path}")
 
         try:
             # Load metadata
@@ -439,71 +830,52 @@ class SequenceRecommender(BaseRecommenderModel):
             self.training_history = metadata['training_history']
             self.default_features = metadata['default_features']
 
-            # Load user and item data
-            with open(os.path.join(path, 'sequence_data.pkl'), 'rb') as f:
-                data = pickle.load(f)
+            # Load game transitions and sequences
+            with open(os.path.join(path, 'game_transitions.pkl'), 'rb') as f:
+                self.game_transitions = pickle.load(f)
 
-            self.user_data = data['user_data']
-            self.item_data = data['item_data']
-            self.item_indices = data['item_indices']
+            with open(os.path.join(path, 'game_sequences.pkl'), 'rb') as f:
+                sequences_dict = pickle.load(f)
+                self.game_sequences = defaultdict(list)
+                for game, seq in sequences_dict.items():
+                    self.game_sequences[game] = seq
 
-            # Initialize model
-            input_size = len(self.default_features)
-            self.model = GameSequenceModel(
-                num_features=input_size,
-                hidden_dim=self.hidden_dim,
-                num_layers=self.num_layers,
-                dropout=self.dropout
-            ).to(self.device)
+            with open(os.path.join(path, 'game_data.pkl'), 'rb') as f:
+                self.game_data = pickle.load(f)
 
-            # Load model state dict
-            state_dict = torch.load(os.path.join(path, 'sequence_model.pt'), map_location=self.device)
-            self.model.load_state_dict(state_dict)
-            self.model.eval()
+            with open(os.path.join(path, 'game_indices.pkl'), 'rb') as f:
+                self.game_indices = pickle.load(f)
 
-            logger.info("Sequence model loaded successfully")
+            with open(os.path.join(path, 'user_history.pkl'), 'rb') as f:
+                self.user_history = pickle.load(f)
+
+            with open(os.path.join(path, 'popular_games.pkl'), 'rb') as f:
+                self.popular_games = pickle.load(f)
+
+            # Initialize and load neural model if exists
+            model_path = os.path.join(path, 'sequence_model.pt')
+            if os.path.exists(model_path) and self.default_features is not None:
+                # Initialize model
+                input_size = len(self.default_features)
+                self.model = GameSequenceModel(
+                    num_features=input_size,
+                    hidden_dim=self.hidden_dim,
+                    num_layers=self.num_layers,
+                    dropout=self.dropout
+                ).to(self.device)
+
+                # Load state dict
+                state_dict = torch.load(model_path, map_location=self.device)
+                self.model.load_state_dict(state_dict)
+                self.model.eval()
+            else:
+                logger.info("No neural model found, using rule-based sequence model only")
+                self.model = None
+
+            logger.info("Game sequence model loaded successfully")
             return self
+
         except Exception as e:
-            logger.error(f"Error loading sequence model: {str(e)}")
+            logger.error(f"Error loading game sequence model: {str(e)}")
+            logger.error(traceback.format_exc())
             return None
-
-    def extract_features(self, user_id, item_id):
-        """Extract features for prediction
-
-        Args:
-            user_id: User ID
-            item_id: Item ID
-
-        Returns:
-            ndarray: Feature vector
-        """
-        # If no feature columns defined, return default features
-        if not self.feature_columns or self.default_features is None:
-            logger.warning("No feature columns defined, using zeros")
-            return np.zeros(self.model.input_size)
-
-        # Initialize feature dictionary
-        features = {}
-
-        # Fill with default values
-        for i, col in enumerate(self.feature_columns):
-            features[col] = self.default_features[i]
-
-        # Update with user-specific features
-        if user_id in self.user_data:
-            user_features = self.user_data[user_id]
-            for col in self.feature_columns:
-                if col in user_features:
-                    features[col] = user_features[col]
-
-        # Update with item-specific features
-        if item_id in self.item_data:
-            item_features = self.item_data[item_id]
-            for col in self.feature_columns:
-                if col in item_features:
-                    features[col] = item_features[col]
-
-        # Convert to array with consistent order
-        feature_array = np.array([features[col] for col in self.feature_columns])
-
-        return feature_array
