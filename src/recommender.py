@@ -322,14 +322,7 @@ class SteamRecommender:
             return self.get_popular_games(n)
 
     def evaluate_recommendations(self, k_values=None):
-        """Evaluate recommendation performance
-
-        Args:
-            k_values (list): List of k values to evaluate
-
-        Returns:
-            dict: Evaluation metrics
-        """
+        """Evaluate recommendation performance"""
         logger.info("Evaluating recommendation performance...")
 
         try:
@@ -343,24 +336,29 @@ class SteamRecommender:
                 logger.error("No test data available for evaluation")
                 return None
 
-            # Set default k values if not provided
+            # 添加这行记录测试数据大小
+            logger.info(
+                f"Test data contains {len(self.data_processor.test_df)} rows and {self.data_processor.test_df['user_id'].nunique()} unique users")
+
+            # 设置默认k值
             if k_values is None:
                 k_values = [5, 10, 20]
 
-            # Make sure test data is available
-            if not hasattr(self.data_processor, 'test_df') or self.data_processor.test_df is None:
-                logger.error("No test data available for evaluation")
-                return None
-
-            # Use the evaluator to evaluate the hybrid model
+            # 使用evaluator评估hybrid模型
             metrics = self.evaluator.evaluate(
                 model=self.hybrid_model,
                 test_df=self.data_processor.test_df,
                 k_values=k_values
             )
 
-            # Store evaluation results
+            # 检查结果
+            if metrics is None:
+                logger.warning("Evaluation returned no results")
+                return None
+
+            # 存储评估结果
             self.evaluation_results = metrics
+            logger.info("Evaluation completed successfully")
 
             return metrics
         except Exception as e:

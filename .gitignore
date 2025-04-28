@@ -15,3 +15,4 @@ src/steam_recommender.log
 /src/visualization/__pycache__
 /recommender_model/hybrid/item_knn
 /recommender_model
+/visualizations

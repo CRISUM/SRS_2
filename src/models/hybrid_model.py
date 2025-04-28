@@ -178,6 +178,23 @@ class HybridRecommender(BaseRecommenderModel):
         model_recommendations = {}
         model_success_count = 0
 
+        # 增加这段: 获取用户的交互历史和时间权重
+        user_time_weights = {}
+        if user_id in self.user_data and 'interactions' in self.user_data[user_id]:
+            interactions = self.user_data[user_id]['interactions']
+            # 如果交互数据有时间信息，计算时间权重
+            if any('date' in interaction for interaction in interactions):
+                latest_date = max(pd.to_datetime(interaction['date'])
+                                  for interaction in interactions if 'date' in interaction)
+
+                for interaction in interactions:
+                    if 'date' in interaction and 'app_id' in interaction:
+                        days_ago = (latest_date - pd.to_datetime(interaction['date'])).days
+                        # 应用时间衰减因子 (0.9^(days/30)) - 每30天衰减10%
+                        decay_factor = self.config.get('time_decay_factor', 0.9)
+                        time_weight = decay_factor ** (days_ago / 30)
+                        user_time_weights[interaction['app_id']] = time_weight
+
         for name, model in self.models.items():
             try:
                 recommendations = model.recommend(user_id, n * 3)  # 获取更多推荐以允许重叠
@@ -194,19 +211,19 @@ class HybridRecommender(BaseRecommenderModel):
                 for item_id, score in recommendations:
                     if item_id not in all_recommendations:
                         all_recommendations[item_id] = 0.0
-                    all_recommendations[item_id] += score * weight
+
+                    # 如果有时间权重信息，应用到分数上
+                    time_weight_multiplier = user_time_weights.get(item_id, 1.0) if user_time_weights else 1.0
+                    all_recommendations[item_id] += score * weight * time_weight_multiplier
             except Exception as e:
                 logger.warning(f"Error getting recommendations from {name} model: {str(e)}")
 
-        # 如果没有获得足够的推荐，使用热门物品
+        # 如果没有获得足够的推荐，使用冷启动策略
         if is_cold_start or model_success_count < 2 or not all_recommendations:
-            logger.info(f"Using popular items for user {user_id} (cold start or insufficient recommendations)")
-            if self.popular_items:
-                recommendations = self.popular_items[:n]
-                self.recommendation_cache[cache_key] = recommendations
-                return recommendations
-            else:
-                return []
+            logger.info(f"Using cold start strategy for user {user_id}")
+            recommendations = self.get_cold_start_recommendations(user_id, n)
+            self.recommendation_cache[cache_key] = recommendations
+            return recommendations
 
         # 按得分降序排序
         sorted_items = sorted(all_recommendations.items(), key=lambda x: x[1], reverse=True)
@@ -352,3 +369,45 @@ class HybridRecommender(BaseRecommenderModel):
         except Exception as e:
             logger.error(f"Error loading hybrid recommender: {str(e)}")
             return None
+
+
+    def get_cold_start_recommendations(self, user_id, n=10):
+        """Generate recommendations for cold start users
+
+        Args:
+            user_id: User ID
+            n (int): Number of recommendations
+
+        Returns:
+            list: List of (item_id, score) tuples
+        """
+        logger.info(f"Generating cold start recommendations for user {user_id}")
+
+        # 检查是否有任何用户信息
+        if user_id in self.user_data:
+            user_info = self.user_data[user_id]
+
+            # 如果有标签偏好，基于标签推荐
+            if 'top_tags' in user_info and user_info['top_tags']:
+                # 查找含有用户偏好标签的热门游戏
+                tag_based_recs = {}
+
+                # 对于每个热门游戏，检查标签匹配
+                for game_id, score in self.popular_items:
+                    if game_id in self.item_data and 'tags' in self.item_data[game_id]:
+                        game_tags = self.item_data[game_id]['tags']
+
+                        # 计算标签匹配度
+                        matching_tags = set(game_tags) & set(user_info['top_tags'])
+                        if matching_tags:
+                            # 计算匹配分数
+                            match_score = len(matching_tags) / len(user_info['top_tags'])
+                            tag_based_recs[game_id] = score * (0.5 + 0.5 * match_score)
+
+                # 排序并返回
+                if tag_based_recs:
+                    sorted_recs = sorted(tag_based_recs.items(), key=lambda x: x[1], reverse=True)
+                    return sorted_recs[:n]
+
+        # 如果没有可用的用户信息或标签推荐，返回热门物品
+        return self.popular_items[:n]

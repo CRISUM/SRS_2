@@ -32,8 +32,40 @@ class GameFeatureExtractor:
         # Implement tag feature extraction
 
     def extract_text_features(self, df):
-        """Extract features from game descriptions"""
-        # Implement text feature extraction
+        """Extract features from game titles and descriptions"""
+        logger.info("Extracting text features from game titles and descriptions...")
+
+        # 合并标题和描述（如果有）
+        text_data = []
+        for i, row in df.drop_duplicates('app_id').iterrows():
+            text = row['title']
+            if 'description' in row and pd.notna(row['description']):
+                text += " " + row['description']
+            text_data.append(text)
+
+        # 使用 TF-IDF 向量化，包括 1-3 gram
+        self.tfidf_vectorizer = TfidfVectorizer(
+            analyzer='word',
+            ngram_range=(1, 3),
+            min_df=2,
+            max_df=0.95,
+            stop_words='english'
+        )
+
+        # 生成特征矩阵
+        tfidf_matrix = self.tfidf_vectorizer.fit_transform(text_data)
+
+        # 使用 SVD 降维
+        text_embedding_dim = min(self.config.get('text_embedding_dim', 100), tfidf_matrix.shape[1])
+        svd = TruncatedSVD(n_components=text_embedding_dim, random_state=42)
+        text_embeddings = svd.fit_transform(tfidf_matrix)
+
+        # 创建映射
+        app_ids = df.drop_duplicates('app_id')['app_id'].values
+        self.text_embeddings = {app_id: embedding for app_id, embedding in zip(app_ids, text_embeddings)}
+
+        logger.info(f"Created text embeddings for {len(self.text_embeddings)} games")
+        return self.text_embeddings
 
     def create_game_embeddings(self, df, collaborative_factors=None):
         """Create game embeddings from content and optionally collaborative data"""

@@ -141,32 +141,62 @@ class ContentBasedModel(BaseRecommenderModel):
         Returns:
             list: List of (item_id, score) tuples
         """
-        # Check if we have user preferences
+        # 检查是否有用户偏好
         if user_id not in self.user_preferences or not self.user_preferences[user_id]:
             logger.warning(f"No preferences found for user {user_id}, returning popular items")
             return self.popular_items[:n]
 
-        # Get user's liked items
+        # 获取用户的喜欢物品
         liked_items = self.user_preferences[user_id]
 
-        # Get similar items to ones the user likes
+        # 检查是否有更丰富的用户数据（来自数据处理器的扩展数据）
+        user_tag_preferences = {}
+        if hasattr(self, 'user_data') and user_id in self.user_data and 'tag_preferences' in self.user_data[user_id]:
+            user_tag_preferences = self.user_data[user_id]['tag_preferences']
+
+        # 获取相似物品
         candidate_items = {}
 
+        # 基于物品相似度的推荐
         for liked_item in liked_items:
             if liked_item in self.similarity_matrix:
                 for sim_item, sim_score in self.similarity_matrix[liked_item]:
-                    # Skip items the user already likes
+                    # 跳过用户已经喜欢的物品
                     if sim_item in liked_items:
                         continue
 
-                    # Update candidate score (take maximum similarity)
+                    # 更新候选物品分数（取最大相似度）
                     if sim_item not in candidate_items or sim_score > candidate_items[sim_item]:
                         candidate_items[sim_item] = sim_score
 
-        # Sort candidates by score
+        # 如果有标签偏好数据，增强基于标签的推荐
+        if user_tag_preferences and hasattr(self, 'item_tags'):
+            for item_id, tags in self.item_tags.items():
+                # 跳过用户已经喜欢的物品
+                if item_id in liked_items:
+                    continue
+
+                # 跳过已经添加的候选物品
+                if item_id in candidate_items:
+                    continue
+
+                # 计算物品标签与用户偏好的匹配度
+                tag_match_score = 0
+                for tag in tags:
+                    if tag in user_tag_preferences:
+                        tag_match_score += user_tag_preferences[tag]
+
+                # 标准化分数并添加到候选物品
+                if tag_match_score > 0:
+                    # 标准化
+                    max_tag_pref = max(user_tag_preferences.values())
+                    normalized_score = tag_match_score / max_tag_pref * 0.8  # 最大可达0.8分
+                    candidate_items[item_id] = normalized_score
+
+        # 按分数排序
         sorted_candidates = sorted(candidate_items.items(), key=lambda x: x[1], reverse=True)
 
-        # Return top N
+        # 返回前N个
         return sorted_candidates[:n]
 
     def update(self, new_data):

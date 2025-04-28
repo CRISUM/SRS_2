@@ -45,83 +45,55 @@ class KNNModel(BaseRecommenderModel):
         self.user_item_matrix = None
         self.sparse_matrix = None
 
+    # 修改 knn_model.py 中的 fit 方法，使用稀疏矩阵直接拟合
     def fit(self, data):
-        """Train the model with provided data
-
-        Args:
-            data (DataFrame or dict): If DataFrame, must contain user_id, item_id, and rating columns
-                                     If dict, must contain 'user_item_matrix' key
-        Returns:
-            self: Trained model
-        """
+        """Train the model with provided data"""
         logger.info(f"Training {self.type}-based KNN model...")
 
-        # Determine the input type and process accordingly
         if isinstance(data, pd.DataFrame):
-            # Extract the necessary columns
-            df_subset = data[['user_id', 'app_id']].copy()
+            # 创建用户和物品的索引映射
+            user_ids = data['user_id'].astype('category')
+            item_ids = data['app_id'].astype('category')
 
-            # 优先使用 rating_new 列
-            if 'rating_new' in data.columns and pd.api.types.is_numeric_dtype(data['rating_new']):
-                df_subset['rating_value'] = data['rating_new']
-                rating_col = 'rating_value'
-            elif 'rating' in data.columns and pd.api.types.is_numeric_dtype(data['rating']):
-                df_subset['rating_value'] = data['rating']
-                rating_col = 'rating_value'
-            elif 'is_recommended' in data.columns:
-                # Convert boolean to numeric value
-                df_subset['rating_value'] = data['is_recommended'].astype(int) * 10
-                rating_col = 'rating_value'
+            # 保存索引映射
+            self.user_indices = {user: i for i, user in enumerate(user_ids.cat.categories)}
+            self.item_indices = {item: i for i, item in enumerate(item_ids.cat.categories)}
+
+            # 反向索引映射
+            self.reversed_user_indices = {i: user for user, i in self.user_indices.items()}
+            self.reversed_item_indices = {i: item for item, i in self.item_indices.items()}
+
+            # 确定评分值（小时数或推荐状态）
+            if 'is_recommended' in data.columns:
+                ratings = data['is_recommended'].astype(int) * 10
             else:
-                # Use hours as interaction value
-                df_subset['rating_value'] = data['hours'].fillna(0)
-                rating_col = 'rating_value'
+                ratings = data['hours'].fillna(0)
 
-            # Create pivot table
-            self.user_item_matrix = pd.pivot_table(
-                df_subset,
-                values=rating_col,
-                index='user_id',
-                columns='app_id',
-                aggfunc='mean',
-                fill_value=0
-            )
-        elif isinstance(data, dict) and 'user_item_matrix' in data:
-            self.user_item_matrix = data['user_item_matrix']
-        else:
-            raise ValueError(
-                "Data must be a DataFrame with user_id, app_id, and rating columns or a dict with user_item_matrix")
+            # 创建稀疏矩阵
+            row = user_ids.cat.codes
+            col = item_ids.cat.codes
+            self.sparse_matrix = csr_matrix((ratings, (row, col)),
+                                            shape=(len(self.user_indices), len(self.item_indices)))
 
-        # Create index mappings
-        self.user_indices = {user: i for i, user in enumerate(self.user_item_matrix.index)}
-        self.item_indices = {item: i for i, item in enumerate(self.user_item_matrix.columns)}
-        self.reversed_user_indices = {i: user for user, i in self.user_indices.items()}
-        self.reversed_item_indices = {i: item for item, i in self.item_indices.items()}
+            # 保存为 user_item_matrix 以兼容现有代码
+            self.user_item_matrix = pd.DataFrame.sparse.from_spmatrix(
+                self.sparse_matrix,
+                index=user_ids.cat.categories,
+                columns=item_ids.cat.categories)
 
-        # Convert to sparse matrix for efficiency
-        self.sparse_matrix = csr_matrix(self.user_item_matrix.values)
-
-        # Initialize and train the model
+        # 初始化和训练模型
         if self.type == 'user':
-            # User-based KNN
             n_neighbors = min(self.n_neighbors, len(self.user_indices))
-            self.model = NearestNeighbors(
-                n_neighbors=n_neighbors,
-                metric=self.metric,
-                algorithm=self.algorithm,
-                n_jobs=-1
-            )
+            self.model = NearestNeighbors(n_neighbors=n_neighbors,
+                                          metric=self.metric,
+                                          algorithm=self.algorithm)
             self.model.fit(self.sparse_matrix)
         else:
-            # Item-based KNN
             n_neighbors = min(self.n_neighbors, len(self.item_indices))
-            self.model = NearestNeighbors(
-                n_neighbors=n_neighbors,
-                metric=self.metric,
-                algorithm=self.algorithm,
-                n_jobs=-1
-            )
-            self.model.fit(self.sparse_matrix.T)  # Transpose for item similarity
+            self.model = NearestNeighbors(n_neighbors=n_neighbors,
+                                          metric=self.metric,
+                                          algorithm=self.algorithm)
+            self.model.fit(self.sparse_matrix.T)
 
         logger.info(f"{self.type}-based KNN model trained successfully")
         return self

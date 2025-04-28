@@ -38,11 +38,28 @@ class RecommenderEvaluator:
             # 使用提供的k值或默认值
             k_values = k_values or self.k_values
 
-            # 限制测试用户数量，提高效率
+            # 检查测试数据
+            if test_df is None or len(test_df) == 0:
+                logger.error("Empty test DataFrame provided")
+                return None
+
+            # 记录测试数据信息
+            logger.info(f"Test DataFrame has {len(test_df)} rows and {test_df['user_id'].nunique()} unique users")
+
+            # 简单直接的测试用户选择方法
             if test_users is None:
-                user_ids = test_df['user_id'].unique()
-                max_users = min(100, len(user_ids))
-                test_users = np.random.choice(user_ids, max_users, replace=False)
+                # 获取所有有推荐项目的用户
+                users_with_recommendations = test_df[test_df['is_recommended'] == True]['user_id'].unique()
+                logger.info(f"Found {len(users_with_recommendations)} users with recommended items")
+
+                # 如果用户数量足够，随机选择100个用户
+                if len(users_with_recommendations) > 0:
+                    sample_size = min(100, len(users_with_recommendations))
+                    test_users = np.random.choice(users_with_recommendations, sample_size, replace=False)
+                    logger.info(f"Selected {len(test_users)} test users randomly from users with recommendations")
+                else:
+                    logger.warning("No users with recommendations found in test data")
+                    return None
 
             logger.info(f"Evaluating model with {len(test_users)} test users")
 
@@ -72,6 +89,7 @@ class RecommenderEvaluator:
 
                 # 跳过没有相关物品的用户
                 if not user_relevant_items:
+                    logger.debug(f"User {user_id} has no relevant items, skipping")
                     continue
 
                 # 获取该用户的推荐
@@ -110,14 +128,14 @@ class RecommenderEvaluator:
                     if diversity is not None:
                         metrics['diversity'][k].append(diversity)
 
-            # 计算覆盖率
-            coverage = len(all_recommended_items) / len(all_items) if len(all_items) > 0 else 0
-            metrics['coverage'] = coverage
-
             # 如果没有成功评估用户，返回None
             if successful_users == 0:
                 logger.warning("No users could be successfully evaluated")
                 return None
+
+            # 计算覆盖率
+            coverage = len(all_recommended_items) / len(all_items) if len(all_items) > 0 else 0
+            metrics['coverage'] = coverage
 
             # 计算平均指标
             results = {}

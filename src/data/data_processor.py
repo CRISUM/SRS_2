@@ -28,6 +28,16 @@ class SteamDataProcessor:
         self.train_df = None
         self.test_df = None
 
+    def optimize_datatypes(self):
+        """Optimize DataFrame data types to reduce memory usage"""
+        for col in self.df.columns:
+            if self.df[col].dtype == 'float64':
+                self.df[col] = self.df[col].astype('float32')
+            if self.df[col].dtype == 'int64':
+                self.df[col] = self.df[col].astype('int32')
+
+        logger.info("Optimized data types to reduce memory usage")
+
     def load_data(self, data_path, chunk_size=500000):
         """Load data in chunks"""
         logger.info(f"Loading data in chunks: {data_path}")
@@ -284,8 +294,53 @@ class SteamDataProcessor:
                 self.train_df['tag_match'] = self.train_df.apply(calc_tag_match, axis=1)
                 self.test_df['tag_match'] = self.test_df.apply(calc_tag_match, axis=1)
 
-            # 6. Create sequence features
-            self.create_sequence_features()
+            # 6. Create user data dictionary with time information
+            user_data = {}
+            for user_id in self.train_df['user_id'].unique():
+                user_interactions = self.train_df[self.train_df['user_id'] == user_id]
+
+                # 构建交互列表
+                interactions = []
+                for _, row in user_interactions.iterrows():
+                    interaction = {
+                        'app_id': row['app_id'],
+                        'is_recommended': row['is_recommended'],
+                        'hours': row['hours'],
+                    }
+
+                    # 如果有日期信息，添加到交互中
+                    if 'date' in row and pd.notna(row['date']):
+                        interaction['date'] = row['date']
+
+                    interactions.append(interaction)
+
+                # 获取用户喜欢的游戏和标签
+                liked_games = user_interactions[user_interactions['is_recommended'] == True]['app_id'].tolist()
+
+                tag_preferences = {}
+                for _, row in user_interactions.iterrows():
+                    if 'tags' in row and pd.notna(row['tags']) and row['tags']:
+                        tags = [tag.strip() for tag in row['tags'].split(',')]
+                        for tag in tags:
+                            if tag not in tag_preferences:
+                                tag_preferences[tag] = 0
+                            weight = 2 if row['is_recommended'] else 1
+                            if pd.notna(row['hours']):
+                                weight *= min(row['hours'] / 10, 3)
+                            tag_preferences[tag] += weight
+
+                sorted_tags = sorted(tag_preferences.items(), key=lambda x: x[1], reverse=True)
+                top_tags = [tag for tag, _ in sorted_tags[:10]]
+
+                user_data[user_id] = {
+                    'interactions': interactions,
+                    'liked_games': liked_games,
+                    'top_tags': top_tags,
+                    'tag_preferences': dict(sorted_tags)
+                }
+
+            # 保存用户数据
+            self.user_data = user_data
 
             logger.info("Feature engineering completed")
             return True
@@ -471,10 +526,81 @@ class SteamDataProcessor:
                 test_size=test_size, random_state=random_state
             )
 
+            # 添加这些关键日志
             logger.info(
                 f"Data split completed: Training set: {len(self.train_df)} samples, Test set: {len(self.test_df)} samples")
+
+            # 检查测试集中的唯一用户数量
+            if self.test_df is not None:
+                unique_test_users = self.test_df['user_id'].nunique()
+                logger.info(f"Test set contains {unique_test_users} unique users")
+
+                # 查看测试集中的必要列
+                test_columns = self.test_df.columns.tolist()
+                logger.info(f"Test set columns: {test_columns}")
+
+                # 确认 is_recommended 列存在且有推荐的物品
+                if 'is_recommended' in self.test_df.columns:
+                    recommended_count = self.test_df['is_recommended'].sum()
+                    logger.info(f"Test set contains {recommended_count} recommended items")
+            else:
+                logger.error("Test DataFrame is None after splitting")
+
             return True
         except Exception as e:
             logger.error(f"Error splitting data: {str(e)}")
             logger.error(traceback.format_exc())
             return False
+
+    def extract_user_preferences(self):
+        """Extract and analyze user preferences"""
+        logger.info("Extracting user preferences...")
+
+        user_preferences = {}
+        item_tags = {}
+
+        # 处理物品标签
+        if hasattr(self, 'train_df') and 'tags' in self.train_df.columns:
+            for _, row in self.train_df.drop_duplicates('app_id').iterrows():
+                app_id = row['app_id']
+                if pd.notna(row['tags']) and row['tags']:
+                    item_tags[app_id] = [tag.strip() for tag in row['tags'].split(',')]
+
+        # 处理用户偏好
+        for user_id in self.train_df['user_id'].unique():
+            user_data = self.train_df[self.train_df['user_id'] == user_id]
+
+            # 喜欢的游戏
+            liked_games = user_data[user_data['is_recommended'] == True]['app_id'].tolist()
+
+            # 标签偏好
+            tag_preferences = {}
+            for _, row in user_data.iterrows():
+                if pd.notna(row['tags']) and row['tags']:
+                    tags = [tag.strip() for tag in row['tags'].split(',')]
+                    for tag in tags:
+                        if tag not in tag_preferences:
+                            tag_preferences[tag] = 0
+
+                        # 计算标签权重
+                        weight = 2 if row['is_recommended'] else 0.5
+
+                        # 考虑游戏时长
+                        if pd.notna(row['hours']):
+                            playtime_factor = min(row['hours'] / 10, 3)  # 最多3倍权重
+                            weight *= playtime_factor
+
+                        tag_preferences[tag] += weight
+
+            # 储存用户偏好
+            user_preferences[user_id] = {
+                'liked_games': liked_games,
+                'tag_preferences': tag_preferences
+            }
+
+        # 保存处理结果
+        self.user_preferences = user_preferences
+        self.item_tags = item_tags
+
+        logger.info(f"Extracted preferences for {len(user_preferences)} users and tags for {len(item_tags)} items")
+        return user_preferences
