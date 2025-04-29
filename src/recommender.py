@@ -1015,7 +1015,7 @@ class SteamRecommender:
                 logger.error("Failed to engineer features")
                 return False
 
-            # 3. 检查数据情况
+            # 3. 检查数据情况 - 记录详细统计信息
             train_df = self.data_processor.train_df
 
             # 记录数据统计情况
@@ -1031,22 +1031,64 @@ class SteamRecommender:
             logger.info(f"Average interactions per user: {avg_interactions_per_user:.2f}, "
                         f"Matrix density: {density:.6f}")
 
+            # 3.1 记录用户交互分布
+            user_interaction_counts = train_df.groupby('user_id').size()
+            logger.info(f"User interaction distribution: Min={user_interaction_counts.min()}, "
+                        f"Max={user_interaction_counts.max()}, "
+                        f"Median={user_interaction_counts.median()}, "
+                        f"Mean={user_interaction_counts.mean():.2f}")
+
+            # 用户交互分布直方图
+            if hasattr(self, 'visualizer'):
+                try:
+                    plt.figure(figsize=(10, 6))
+                    plt.hist(user_interaction_counts, bins=30, alpha=0.7)
+                    plt.title('User Interaction Distribution', fontsize=16)
+                    plt.xlabel('Number of Interactions', fontsize=14)
+                    plt.ylabel('Number of Users', fontsize=14)
+                    plt.grid(True, alpha=0.3)
+                    plt.savefig(os.path.join(self.visualizer.output_dir, 'user_interaction_distribution.png'),
+                                dpi=300, bbox_inches='tight')
+                    plt.close()
+                except Exception as e:
+                    logger.warning(f"Could not create user interaction histogram: {str(e)}")
+
             # 4. 训练基础模型
+            logger.info("Training base recommendation models...")
             success = self.train_models()
             if not success:
                 logger.error("Failed to train models")
                 return False
 
-            # 5. 增强内容模型
-            self.enhance_content_model()
+            # 5. 增强内容模型 - 明确记录日志
+            logger.info("Enhancing content-based model...")
+            if self.enhance_content_model():
+                logger.info("Content-based model enhanced successfully")
+            else:
+                logger.warning("Content-based model enhancement failed or skipped")
 
-            # 6. 优化模型权重
-            self.optimize_model_weights()
+            # 6. 优化模型权重 - 确保执行并记录结果
+            logger.info("Optimizing model weights for data characteristics...")
+            if self.optimize_model_weights():
+                logger.info("Model weights optimized successfully")
+
+                # 检查权重是否实际更新
+                if hasattr(self.hybrid_model, 'weights'):
+                    logger.info(f"New model weights: {self.hybrid_model.weights}")
+                else:
+                    logger.warning("Hybrid model has no weights attribute after optimization")
+            else:
+                logger.warning("Model weight optimization failed or skipped")
 
             # 7. 增强多样性和覆盖率
-            self.improve_diversity_and_coverage()
+            logger.info("Improving recommendation diversity and coverage...")
+            if self.improve_diversity_and_coverage():
+                logger.info("Diversity and coverage improvements applied successfully")
+            else:
+                logger.warning("Diversity and coverage improvements failed or skipped")
 
             # 8. 评估推荐质量
+            logger.info("Evaluating recommendation quality...")
             evaluation_results = self.evaluate_recommendations()
             if evaluation_results:
                 logger.info("Recommendation system evaluation results:")
@@ -1057,9 +1099,33 @@ class SteamRecommender:
 
                 if 'coverage' in evaluation_results:
                     logger.info(f"Coverage: {evaluation_results['coverage']:.4f}")
+            else:
+                logger.warning("Recommendation evaluation failed or returned no results")
 
-            # 9. 创建可视化结果
-            self.visualize_results()
+            # 9. 测试不同的KNN参数
+            logger.info("Testing different KNN parameters...")
+            if hasattr(self, 'test_knn_clustering'):
+                knn_results = self.test_knn_clustering(
+                    user_neighbors_range=[5, 10, 15, 20, 25, 30, 40],
+                    item_neighbors_range=[5, 10, 15, 20, 25, 30]
+                )
+
+                # 可视化KNN测试结果
+                if knn_results and hasattr(self.visualizer, 'visualize_knn_optimization'):
+                    self.visualizer.visualize_knn_optimization(knn_results)
+                elif knn_results:
+                    logger.info("KNN test completed but no visualization method available")
+                else:
+                    logger.warning("KNN parameter testing failed or returned no results")
+            else:
+                logger.warning("KNN testing method not available")
+
+            # 10. 创建可视化结果
+            logger.info("Creating visualizations...")
+            if self.visualize_results():
+                logger.info("Visualizations created successfully")
+            else:
+                logger.warning("Visualization creation failed or skipped")
 
             logger.info("Recommendation system training and optimization completed successfully")
             return True
@@ -1081,11 +1147,11 @@ class SteamRecommender:
         """
         logger.info("测试不同KNN邻居数量的影响...")
 
-        # 设置默认测试范围
+        # 设置默认测试范围 - 更多的测试值
         if user_neighbors_range is None:
-            user_neighbors_range = [20, 30, 40, 50, 60]
+            user_neighbors_range = [5, 10, 15, 20, 25, 30, 40, 50, 60]
         if item_neighbors_range is None:
-            item_neighbors_range = [15, 20, 25, 30, 35]
+            item_neighbors_range = [5, 10, 15, 20, 25, 30, 35, 40]
 
         # 存储原始配置以便测试后恢复
         original_config = self.config.copy()
@@ -1135,13 +1201,13 @@ class SteamRecommender:
                     metrics = self.evaluator.evaluate(
                         model=temp_hybrid,
                         test_df=test_df,
-                        k_values=[10]  # 仅使用k=10进行评估以提高速度
+                        k_values=[5, 10, 20]  # 使用多个k值评估
                     )
 
                     if metrics is not None:
                         results[config_key] = metrics
 
-                        # 跟踪最佳参数
+                        # 跟踪最佳参数 (使用NDCG@10作为主要指标)
                         ndcg_10 = metrics['ndcg'][10]
                         if ndcg_10 > best_ndcg:
                             best_ndcg = ndcg_10
@@ -1161,6 +1227,9 @@ class SteamRecommender:
                 logger.info(f"最佳KNN参数: user_neighbors={best_params['user_neighbors']}, "
                             f"item_neighbors={best_params['item_neighbors']}, "
                             f"NDCG@10={best_params['ndcg@10']:.4f}")
+
+            # 可视化KNN测试结果
+            self._visualize_knn_test_results(results)
 
             return results
 
@@ -1232,3 +1301,150 @@ class SteamRecommender:
             return avg_results
 
         return None
+
+    def _visualize_knn_test_results(self, results):
+        """可视化KNN测试结果
+
+        Args:
+            results (dict): 测试结果字典，键为参数组合，值为评估指标
+        """
+        if not results:
+            logger.warning("没有KNN测试结果可视化")
+            return
+
+        try:
+            # 确保可视化目录存在
+            if not hasattr(self, 'visualizer'):
+                from visualization.visualizer import RecommenderVisualizer
+                self.visualizer = RecommenderVisualizer(output_dir='visualizations')
+
+            # 提取参数组合和对应的NDCG@10值
+            user_neighbors = []
+            item_neighbors = []
+            ndcg_values = []
+
+            for config_key, metrics in results.items():
+                # 解析配置键 "user_X_item_Y"
+                parts = config_key.split('_')
+                if len(parts) >= 4:
+                    user_n = int(parts[1])
+                    item_n = int(parts[3])
+                    ndcg = metrics['ndcg'][10]  # 使用NDCG@10
+
+                    user_neighbors.append(user_n)
+                    item_neighbors.append(item_n)
+                    ndcg_values.append(ndcg)
+
+            # 创建热图数据
+            import numpy as np
+            import pandas as pd
+            import matplotlib.pyplot as plt
+            import seaborn as sns
+
+            # 获取唯一的邻居值
+            unique_user_n = sorted(set(user_neighbors))
+            unique_item_n = sorted(set(item_neighbors))
+
+            # 创建热图矩阵
+            heatmap_data = np.zeros((len(unique_user_n), len(unique_item_n)))
+
+            # 填充热图数据
+            for u, i, ndcg in zip(user_neighbors, item_neighbors, ndcg_values):
+                u_idx = unique_user_n.index(u)
+                i_idx = unique_item_n.index(i)
+                heatmap_data[u_idx, i_idx] = ndcg
+
+            # 创建热图
+            plt.figure(figsize=(12, 10))
+            ax = sns.heatmap(
+                heatmap_data,
+                annot=True,
+                fmt=".4f",
+                cmap="viridis",
+                xticklabels=unique_item_n,
+                yticklabels=unique_user_n,
+                cbar_kws={'label': 'NDCG@10'}
+            )
+
+            plt.title('KNN Parameter Optimization - NDCG@10', fontsize=16)
+            plt.xlabel('Item Neighbors', fontsize=14)
+            plt.ylabel('User Neighbors', fontsize=14)
+
+            # 保存图表
+            output_dir = self.visualizer.output_dir
+            os.makedirs(output_dir, exist_ok=True)
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_dir, 'knn_parameter_optimization.png'), dpi=300, bbox_inches='tight')
+            plt.close()
+
+            # 创建折线图 - 用户邻居数量对性能的影响
+            plt.figure(figsize=(12, 6))
+
+            # 对每个item_n值绘制一条线
+            for item_n in unique_item_n:
+                item_ndcg = []
+                for user_n in unique_user_n:
+                    try:
+                        config_key = f"user_{user_n}_item_{item_n}"
+                        if config_key in results:
+                            item_ndcg.append(results[config_key]['ndcg'][10])
+                        else:
+                            item_ndcg.append(None)  # 缺失数据
+                    except:
+                        item_ndcg.append(None)
+
+                # 绘制线条，忽略缺失值
+                valid_indices = [i for i, v in enumerate(item_ndcg) if v is not None]
+                valid_user_n = [unique_user_n[i] for i in valid_indices]
+                valid_ndcg = [item_ndcg[i] for i in valid_indices]
+
+                if valid_ndcg:
+                    plt.plot(valid_user_n, valid_ndcg, marker='o', label=f'Item Neighbors={item_n}')
+
+            plt.title('Impact of User Neighbors on NDCG@10', fontsize=16)
+            plt.xlabel('User Neighbors', fontsize=14)
+            plt.ylabel('NDCG@10', fontsize=14)
+            plt.grid(True, alpha=0.3)
+            plt.legend()
+
+            plt.savefig(os.path.join(output_dir, 'user_neighbors_impact.png'), dpi=300, bbox_inches='tight')
+            plt.close()
+
+            # 创建折线图 - 物品邻居数量对性能的影响
+            plt.figure(figsize=(12, 6))
+
+            # 对每个user_n值绘制一条线
+            for user_n in unique_user_n:
+                user_ndcg = []
+                for item_n in unique_item_n:
+                    try:
+                        config_key = f"user_{user_n}_item_{item_n}"
+                        if config_key in results:
+                            user_ndcg.append(results[config_key]['ndcg'][10])
+                        else:
+                            user_ndcg.append(None)  # 缺失数据
+                    except:
+                        user_ndcg.append(None)
+
+                # 绘制线条，忽略缺失值
+                valid_indices = [i for i, v in enumerate(user_ndcg) if v is not None]
+                valid_item_n = [unique_item_n[i] for i in valid_indices]
+                valid_ndcg = [user_ndcg[i] for i in valid_indices]
+
+                if valid_ndcg:
+                    plt.plot(valid_item_n, valid_ndcg, marker='o', label=f'User Neighbors={user_n}')
+
+            plt.title('Impact of Item Neighbors on NDCG@10', fontsize=16)
+            plt.xlabel('Item Neighbors', fontsize=14)
+            plt.ylabel('NDCG@10', fontsize=14)
+            plt.grid(True, alpha=0.3)
+            plt.legend()
+
+            plt.savefig(os.path.join(output_dir, 'item_neighbors_impact.png'), dpi=300, bbox_inches='tight')
+            plt.close()
+
+            logger.info("KNN测试结果可视化已完成")
+
+        except Exception as e:
+            logger.error(f"KNN测试结果可视化错误: {str(e)}")
+            logger.error(traceback.format_exc())

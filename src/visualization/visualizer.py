@@ -548,3 +548,167 @@ class RecommenderVisualizer:
         except Exception as e:
             logger.error(f"Error creating user activity visualization: {str(e)}")
             logger.error(traceback.format_exc())
+
+    # !/usr/bin/env python
+    # -*- coding: utf-8 -*-
+
+    def visualize_knn_optimization(self, knn_results):
+        """Visualize KNN parameter optimization results
+
+        Args:
+            knn_results (dict): Dictionary mapping parameter configs to metrics
+        """
+        logger.info("Creating KNN parameter optimization visualization...")
+
+        try:
+            if not knn_results:
+                logger.warning("No KNN optimization results to visualize")
+                return
+
+            import numpy as np
+
+            # Extract parameter combinations and NDCG values
+            user_neighbors = []
+            item_neighbors = []
+            ndcg_values = []
+
+            for config_key, metrics in knn_results.items():
+                # Parse config key format "user_X_item_Y"
+                parts = config_key.split('_')
+                if len(parts) >= 4:
+                    user_n = int(parts[1])
+                    item_n = int(parts[3])
+                    if isinstance(metrics, dict) and 'ndcg' in metrics and 10 in metrics['ndcg']:
+                        ndcg = metrics['ndcg'][10]  # Use NDCG@10
+
+                        user_neighbors.append(user_n)
+                        item_neighbors.append(item_n)
+                        ndcg_values.append(ndcg)
+
+            # Get unique neighbor values
+            unique_user_n = sorted(set(user_neighbors))
+            unique_item_n = sorted(set(item_neighbors))
+
+            # Create heatmap matrix
+            heatmap_data = np.zeros((len(unique_user_n), len(unique_item_n)))
+
+            # Fill heatmap data
+            for u, i, ndcg in zip(user_neighbors, item_neighbors, ndcg_values):
+                u_idx = unique_user_n.index(u)
+                i_idx = unique_item_n.index(i)
+                heatmap_data[u_idx, i_idx] = ndcg
+
+            # Create heatmap
+            plt.figure(figsize=(12, 10))
+            sns.heatmap(
+                heatmap_data,
+                annot=True,
+                fmt=".4f",
+                cmap="viridis",
+                xticklabels=unique_item_n,
+                yticklabels=unique_user_n,
+                cbar_kws={'label': 'NDCG@10'}
+            )
+
+            plt.title('KNN Parameter Optimization - NDCG@10', fontsize=16)
+            plt.xlabel('Item Neighbors', fontsize=14)
+            plt.ylabel('User Neighbors', fontsize=14)
+
+            # Save chart
+            plt.tight_layout()
+            plt.savefig(os.path.join(self.output_dir, 'knn_parameter_optimization.png'), dpi=300, bbox_inches='tight')
+            plt.close()
+
+            # Create line chart - Impact of user neighbors
+            plt.figure(figsize=(12, 6))
+
+            # Plot a line for each item_n value
+            for item_n in unique_item_n:
+                item_ndcg = []
+                for user_n in unique_user_n:
+                    try:
+                        config_key = f"user_{user_n}_item_{item_n}"
+                        if config_key in knn_results and 'ndcg' in knn_results[config_key]:
+                            item_ndcg.append(knn_results[config_key]['ndcg'][10])
+                        else:
+                            item_ndcg.append(None)  # Missing data
+                    except:
+                        item_ndcg.append(None)
+
+                # Plot line, ignoring missing values
+                valid_indices = [i for i, v in enumerate(item_ndcg) if v is not None]
+                valid_user_n = [unique_user_n[i] for i in valid_indices]
+                valid_ndcg = [item_ndcg[i] for i in valid_indices]
+
+                if valid_ndcg:
+                    plt.plot(valid_user_n, valid_ndcg, marker='o', label=f'Item Neighbors={item_n}')
+
+            plt.title('Impact of User Neighbors on NDCG@10', fontsize=16)
+            plt.xlabel('User Neighbors', fontsize=14)
+            plt.ylabel('NDCG@10', fontsize=14)
+            plt.grid(True, alpha=0.3)
+            plt.legend()
+
+            plt.savefig(os.path.join(self.output_dir, 'user_neighbors_impact.png'), dpi=300, bbox_inches='tight')
+            plt.close()
+
+            # Create line chart - Impact of item neighbors
+            plt.figure(figsize=(12, 6))
+
+            # Plot a line for each user_n value
+            for user_n in unique_user_n:
+                user_ndcg = []
+                for item_n in unique_item_n:
+                    try:
+                        config_key = f"user_{user_n}_item_{item_n}"
+                        if config_key in knn_results and 'ndcg' in knn_results[config_key]:
+                            user_ndcg.append(knn_results[config_key]['ndcg'][10])
+                        else:
+                            user_ndcg.append(None)  # Missing data
+                    except:
+                        user_ndcg.append(None)
+
+                # Plot line, ignoring missing values
+                valid_indices = [i for i, v in enumerate(user_ndcg) if v is not None]
+                valid_item_n = [unique_item_n[i] for i in valid_indices]
+                valid_ndcg = [user_ndcg[i] for i in valid_indices]
+
+                if valid_ndcg:
+                    plt.plot(valid_item_n, valid_ndcg, marker='o', label=f'User Neighbors={user_n}')
+
+            plt.title('Impact of Item Neighbors on NDCG@10', fontsize=16)
+            plt.xlabel('Item Neighbors', fontsize=14)
+            plt.ylabel('NDCG@10', fontsize=14)
+            plt.grid(True, alpha=0.3)
+            plt.legend()
+
+            plt.savefig(os.path.join(self.output_dir, 'item_neighbors_impact.png'), dpi=300, bbox_inches='tight')
+            plt.close()
+
+            # Find and highlight best parameters
+            best_ndcg = np.max(heatmap_data)
+            best_indices = np.where(heatmap_data == best_ndcg)
+            best_user_n = unique_user_n[best_indices[0][0]]
+            best_item_n = unique_item_n[best_indices[1][0]]
+
+            # Create summary figure
+            plt.figure(figsize=(8, 6))
+
+            # Create a simple bar chart with the best configuration
+            plt.bar(['Best Configuration'], [best_ndcg], color='teal', alpha=0.7)
+            plt.title(f'Best KNN Configuration: User={best_user_n}, Item={best_item_n}', fontsize=14)
+            plt.ylabel('NDCG@10', fontsize=12)
+            plt.ylim(0, min(1.0, best_ndcg * 1.2))  # Set reasonable y limit
+
+            # Add value label
+            plt.text(0, best_ndcg + 0.02, f'{best_ndcg:.4f}', ha='center', va='bottom', fontsize=12)
+
+            plt.tight_layout()
+            plt.savefig(os.path.join(self.output_dir, 'knn_best_configuration.png'), dpi=300, bbox_inches='tight')
+            plt.close()
+
+            logger.info("KNN parameter optimization visualization created successfully")
+
+        except Exception as e:
+            logger.error(f"Error creating KNN parameter visualization: {str(e)}")
+            logger.error(traceback.format_exc())
