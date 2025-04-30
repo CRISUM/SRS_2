@@ -705,6 +705,132 @@ def serve(path):
     else:
         return send_from_directory(app.static_folder, 'index.html')
 
+# 自定义推荐
+@app.route('/api/custom-recommendations', methods=['POST'])
+def custom_recommendations():
+    """基于用户操作生成自定义推荐API"""
+    try:
+        # 获取用户操作
+        user_actions = request.get_json()
+
+        # 记录用户操作信息
+        logger.info(f"Generating custom recommendations based on user actions:")
+        logger.info(f"Liked games: {len(user_actions.get('liked', []))} games")
+        logger.info(f"Purchased games: {len(user_actions.get('purchased', []))} games")
+        logger.info(f"Recommended games: {len(user_actions.get('recommended', []))} games")
+
+        # 提取所有用户有操作的游戏ID
+        all_action_game_ids = set()
+        all_action_game_ids.update(user_actions.get('liked', []))
+        all_action_game_ids.update(user_actions.get('purchased', []))
+        all_action_game_ids.update(user_actions.get('recommended', []))
+
+        # 如果用户没有任何操作，返回热门游戏
+        if not all_action_game_ids:
+            popular_games = get_popular_games(10)
+            popular_list = []
+            for game_id, popularity in popular_games:
+                game_info = get_game_info(game_id)
+                if game_info:
+                    game_info['score'] = float(popularity)
+                    popular_list.append(game_info)
+
+            return jsonify({
+                'status': 'success',
+                'recommendations': popular_list,
+                'is_popular': True
+            })
+
+        # 查找与用户操作过的游戏相似的游戏
+        similar_game_scores = {}  # 游戏ID -> 累计相似度分数
+        games_excluded = set(all_action_game_ids)  # 排除用户已经操作过的游戏
+
+        # 不同操作类型的权重
+        action_weights = {
+            'liked': 3.0,  # 喜欢的游戏权重最高
+            'purchased': 2.0,  # 购买的游戏权重次之
+            'recommended': 2.5  # 推荐的游戏权重也较高
+        }
+
+        # 为每种操作类型获取相似游戏
+        for action_type, game_ids in user_actions.items():
+            if action_type not in action_weights or not game_ids:
+                continue
+
+            weight = action_weights[action_type]
+
+            for game_id in game_ids:
+                # 获取相似游戏
+                similar_games = get_similar_games(game_id, 5)
+
+                # 累加相似度分数
+                for similar_id, similarity in similar_games:
+                    if similar_id not in games_excluded:
+                        # 加权相似度
+                        weighted_similarity = similarity * weight
+                        if similar_id in similar_game_scores:
+                            similar_game_scores[similar_id] += weighted_similarity
+                        else:
+                            similar_game_scores[similar_id] = weighted_similarity
+
+        # 获取标签信息以增加多样性
+        if games_df is not None and 'tags' in games_df.columns:
+            # 提取用户操作过的游戏标签
+            user_game_tags = set()
+            for game_id in all_action_game_ids:
+                game_data = games_df[games_df['app_id'] == game_id]
+                if len(game_data) > 0 and 'tags' in game_data.columns and pd.notna(game_data['tags'].iloc[0]):
+                    tags = [tag.strip() for tag in game_data['tags'].iloc[0].split(',')]
+                    user_game_tags.update(tags)
+
+            # 为有相同标签的游戏增加分数
+            for similar_id in list(similar_game_scores.keys()):
+                game_data = games_df[games_df['app_id'] == similar_id]
+                if len(game_data) > 0 and 'tags' in game_data.columns and pd.notna(game_data['tags'].iloc[0]):
+                    tags = [tag.strip() for tag in game_data['tags'].iloc[0].split(',')]
+                    # 计算与用户标签的重叠
+                    common_tags = set(tags) & user_game_tags
+                    if common_tags:
+                        # 标签匹配加分
+                        tag_bonus = 0.2 * len(common_tags)
+                        similar_game_scores[similar_id] += tag_bonus
+
+        # 排序并获取前10个推荐
+        sorted_recommendations = sorted(similar_game_scores.items(), key=lambda x: x[1], reverse=True)[:10]
+
+        # 如果推荐不足10个，添加一些流行游戏
+        if len(sorted_recommendations) < 10:
+            already_recommended = set(game_id for game_id, _ in sorted_recommendations)
+            popular_games = get_popular_games(20)
+
+            for game_id, popularity in popular_games:
+                if game_id not in already_recommended and game_id not in games_excluded:
+                    sorted_recommendations.append((game_id, popularity * 0.7))  # 降低权重
+                    if len(sorted_recommendations) >= 10:
+                        break
+
+        # 获取游戏详情
+        recommendations_with_details = []
+        for game_id, score in sorted_recommendations:
+            game_info = get_game_info(game_id)
+            if game_info:
+                # 归一化分数到0-1范围
+                normalized_score = min(score / 5.0, 1.0)
+                game_info['score'] = float(normalized_score)
+                recommendations_with_details.append(game_info)
+
+        return jsonify({
+            'status': 'success',
+            'recommendations': recommendations_with_details,
+            'is_popular': False
+        })
+
+    except Exception as e:
+        logger.error(f"Error generating custom recommendations: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': 'Failed to generate recommendations. Please try again later.'
+        }), 500
 
 # 启动应用
 if __name__ == '__main__':

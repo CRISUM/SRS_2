@@ -17,6 +17,8 @@ import pandas as pd
 import torch
 import traceback
 
+from matplotlib import pyplot as plt
+
 from data.data_processor import SteamDataProcessor
 from data.feature_extractor import GameFeatureExtractor
 from models.knn_model import KNNModel

@@ -4,15 +4,28 @@ import { useParams, Link } from 'react-router-dom';
 import axios from 'axios';
 import { toast } from 'react-toastify';
 import GameCard from './GameCard';
+import Register from "./Register";
 
-const GameDetails = ({ userPreferences, updatePreference }) => {
+const GameDetails = () => {
   const { gameId } = useParams();
   const [game, setGame] = useState(null);
   const [similarGames, setSimilarGames] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  const isLiked = userPreferences?.liked_games?.some(g => g.id === parseInt(gameId));
-  const isDisliked = userPreferences?.disliked_games?.some(g => g.id === parseInt(gameId));
+  // 从本地存储加载用户操作
+  const [userActions, setUserActions] = useState(() => {
+    const savedActions = localStorage.getItem('userGameActions');
+    return savedActions ? JSON.parse(savedActions) : {
+      liked: [],
+      purchased: [],
+      recommended: []
+    };
+  });
+
+  // 检查游戏在用户各操作列表中的状态
+  const isLiked = userActions?.liked?.includes(parseInt(gameId));
+  const isPurchased = userActions?.purchased?.includes(parseInt(gameId));
+  const isRecommended = userActions?.recommended?.includes(parseInt(gameId));
 
   useEffect(() => {
     const fetchGameData = async () => {
@@ -37,12 +50,61 @@ const GameDetails = ({ userPreferences, updatePreference }) => {
     fetchGameData();
   }, [gameId]);
 
-  const handleLike = () => {
-    updatePreference(isLiked ? 'unlike' : 'like', parseInt(gameId));
-  };
+  // 保存用户操作到本地存储
+  useEffect(() => {
+    localStorage.setItem('userGameActions', JSON.stringify(userActions));
+  }, [userActions]);
 
-  const handleDislike = () => {
-    updatePreference(isDisliked ? 'undislike' : 'dislike', parseInt(gameId));
+  const handleGameAction = (gameId, actionType) => {
+    setUserActions(prev => {
+      // 创建操作数组的副本
+      const newActions = { ...prev };
+      const gameIdNum = parseInt(gameId);
+
+      // 根据操作类型更新相应数组
+      switch (actionType) {
+        case 'like':
+          if (!newActions.liked.includes(gameIdNum)) {
+            newActions.liked = [...newActions.liked, gameIdNum];
+          }
+          break;
+        case 'buy':
+          if (!newActions.purchased.includes(gameIdNum)) {
+            newActions.purchased = [...newActions.purchased, gameIdNum];
+          }
+          break;
+        case 'recommend':
+          if (!newActions.recommended.includes(gameIdNum)) {
+            newActions.recommended = [...newActions.recommended, gameIdNum];
+          }
+          break;
+        case 'unlike':
+          newActions.liked = newActions.liked.filter(id => id !== gameIdNum);
+          break;
+        case 'unbuy':
+          newActions.purchased = newActions.purchased.filter(id => id !== gameIdNum);
+          break;
+        case 'unrecommend':
+          newActions.recommended = newActions.recommended.filter(id => id !== gameIdNum);
+          break;
+        default:
+          break;
+      }
+
+      return newActions;
+    });
+
+    // 显示操作的通知
+    const actionMessages = {
+      like: 'Game added to liked games',
+      buy: 'Game added to your library',
+      recommend: 'Game added to recommended games',
+      unlike: 'Game removed from liked games',
+      unbuy: 'Game removed from your library',
+      unrecommend: 'Game removed from recommended games'
+    };
+
+    toast.success(actionMessages[actionType] || 'Action recorded');
   };
 
   if (loading) {
@@ -102,31 +164,45 @@ const GameDetails = ({ userPreferences, updatePreference }) => {
 
             <div className="flex space-x-2">
               <button
-                onClick={handleLike}
+                onClick={() => handleGameAction(gameId, isLiked ? 'unlike' : 'like')}
                 className={`flex items-center space-x-1 px-4 py-2 rounded-md ${
                   isLiked 
+                    ? 'bg-red-600 text-white' 
+                    : 'bg-gray-200 hover:bg-gray-300 text-gray-800'
+                }`}
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M3.172 5.172a4 4 0 015.656 0L10 6.343l1.172-1.171a4 4 0 115.656 5.656L10 17.657l-6.828-6.829a4 4 0 010-5.656z" clipRule="evenodd" />
+                </svg>
+                <span>{isLiked ? 'Liked' : 'Like'}</span>
+              </button>
+
+              <button
+                onClick={() => handleGameAction(gameId, isPurchased ? 'unbuy' : 'buy')}
+                className={`flex items-center space-x-1 px-4 py-2 rounded-md ${
+                  isPurchased 
                     ? 'bg-green-600 text-white' 
+                    : 'bg-gray-200 hover:bg-gray-300 text-gray-800'
+                }`}
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                  <path d="M3 1a1 1 0 000 2h1.22l.305 1.222a.997.997 0 00.01.042l1.358 5.43-.893.892C3.74 11.846 4.632 14 6.414 14H15a1 1 0 000-2H6.414l1-1H14a1 1 0 00.894-.553l3-6A1 1 0 0017 3H6.28l-.31-1.243A1 1 0 005 1H3zM16 16.5a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0zM6.5 18a1.5 1.5 0 100-3 1.5 1.5 0 000 3z" />
+                </svg>
+                <span>{isPurchased ? 'In Library' : 'Add to Library'}</span>
+              </button>
+
+              <button
+                onClick={() => handleGameAction(gameId, isRecommended ? 'unrecommend' : 'recommend')}
+                className={`flex items-center space-x-1 px-4 py-2 rounded-md ${
+                  isRecommended 
+                    ? 'bg-blue-600 text-white' 
                     : 'bg-gray-200 hover:bg-gray-300 text-gray-800'
                 }`}
               >
                 <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                   <path d="M2 10.5a1.5 1.5 0 113 0v6a1.5 1.5 0 01-3 0v-6zM6 10.333v5.43a2 2 0 001.106 1.79l.05.025A4 4 0 008.943 18h5.416a2 2 0 001.962-1.608l1.2-6A2 2 0 0015.56 8H12V4a2 2 0 00-2-2 1 1 0 00-1 1v.667a4 4 0 01-.8 2.4L6.8 7.933a4 4 0 00-.8 2.4z" />
                 </svg>
-                <span>{isLiked ? 'Liked' : 'Like'}</span>
-              </button>
-
-              <button
-                onClick={handleDislike}
-                className={`flex items-center space-x-1 px-4 py-2 rounded-md ${
-                  isDisliked 
-                    ? 'bg-red-600 text-white' 
-                    : 'bg-gray-200 hover:bg-gray-300 text-gray-800'
-                }`}
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                  <path d="M18 9.5a1.5 1.5 0 11-3 0v-6a1.5 1.5 0 013 0v6zM14 9.667v-5.43a2 2 0 00-1.105-1.79l-.05-.025A4 4 0 0011.055 2H5.64a2 2 0 00-1.962 1.608l-1.2 6A2 2 0 004.44 12H8v4a2 2 0 002 2 1 1 0 001-1v-.667a4 4 0 01.8-2.4l1.4-1.866a4 4 0 00.8-2.4z" />
-                </svg>
-                <span>{isDisliked ? 'Disliked' : 'Dislike'}</span>
+                <span>{isRecommended ? 'Recommended' : 'Recommend'}</span>
               </button>
             </div>
           </div>
@@ -141,7 +217,7 @@ const GameDetails = ({ userPreferences, updatePreference }) => {
 
             {game.price_final !== undefined && (
               <p className="mb-2">
-                <strong>Price:</strong> ${game.price_final.toFixed(2)}
+                <strong>Price:</strong> {game.price_final === 0 ? "Free to Play" : `$${game.price_final.toFixed(2)}`}
               </p>
             )}
 
@@ -176,17 +252,15 @@ const GameDetails = ({ userPreferences, updatePreference }) => {
               <GameCard
                 key={similarGame.id}
                 game={similarGame}
-                userPreferences={userPreferences}
-                updatePreference={updatePreference}
-                showScore={false}
+                onAction={handleGameAction}
+                userActions={userActions}
               />
             ))}
           </div>
         </div>
       )}
     </div>
-  );
+  )
 };
 
 export default GameDetails;
-
