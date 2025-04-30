@@ -16,6 +16,8 @@ import os
 import pickle
 import json
 
+from pandas._libs.parsers import defaultdict
+
 from .base_model import BaseRecommenderModel
 
 logger = logging.getLogger(__name__)
@@ -151,8 +153,11 @@ class HybridRecommender(BaseRecommenderModel):
         else:
             return 0.5
 
+    # In Py_GetModel_src/models/hybrid_model.py
+    # Modify the recommend method to add a stronger diversity component:
+
     def recommend(self, user_id, n=10):
-        """Generate top-N recommendations for a user
+        """Generate top-N recommendations for a user with enhanced diversity
 
         Args:
             user_id: User ID
@@ -173,45 +178,32 @@ class HybridRecommender(BaseRecommenderModel):
 
         # 初始化标志，判断用户是否是冷启动用户
         is_cold_start = True
+        model_success = {}
 
         # 从各个模型获取推荐
         all_recommendations = {}
         model_recommendations = {}
         model_success_count = 0
 
-        # 为多样性追踪各个模型提供的独特物品
-        unique_items_by_model = {}
-
-        # 跟踪被推荐物品的来源模型
-        item_source_models = {}
-
-        # 增加这段: 获取用户的交互历史和时间权重
-        user_time_weights = {}
-        if hasattr(self, 'user_data') and user_id in self.user_data and 'interactions' in self.user_data[user_id]:
-            interactions = self.user_data[user_id]['interactions']
-            # 如果交互数据有时间信息，计算时间权重
-            if any('date' in interaction for interaction in interactions):
-                latest_date = max(pd.to_datetime(interaction['date'])
-                                  for interaction in interactions if 'date' in interaction)
-
-                for interaction in interactions:
-                    if 'date' in interaction and 'app_id' in interaction:
-                        days_ago = (latest_date - pd.to_datetime(interaction['date'])).days
-                        # 应用时间衰减因子 (0.9^(days/30)) - 每30天衰减10%
-                        decay_factor = self.config.get('time_decay_factor', 0.9) if hasattr(self, 'config') else 0.9
-                        time_weight = decay_factor ** (days_ago / 30)
-                        user_time_weights[interaction['app_id']] = time_weight
-
         # 用于多样性控制的物品标签集合
         item_tags = {}
 
+        # 为多样性追踪各个模型提供的独特物品
+        unique_items_by_model = {}
+
         # 获取推荐数量上限，用于多样性
         n_extended = n * 3  # 获取更多候选项用于多样性
+
+        # 定义多样性因子 - 更高的值会增加多样性
+        diversity_factor = 0.4  # 增加到0.4，比之前的0.3更高
 
         for name, model in self.models.items():
             try:
                 # 获取每个模型的推荐
                 recommendations = model.recommend(user_id, n_extended)
+
+                # 记录是否成功
+                model_success[name] = len(recommendations) > 0
 
                 # 如果成功获得推荐，用户不是冷启动用户
                 if recommendations and len(recommendations) > 0:
@@ -223,21 +215,13 @@ class HybridRecommender(BaseRecommenderModel):
                 # 跟踪此模型提供的独特物品
                 unique_items_by_model[name] = {item_id for item_id, _ in recommendations}
 
-                # 记录物品的来源模型
-                for item_id, _ in recommendations:
-                    if item_id not in item_source_models:
-                        item_source_models[item_id] = []
-                    item_source_models[item_id].append(name)
-
                 # 使用模型权重添加到所有推荐中
                 weight = self.weights.get(name, 0.0)
                 for item_id, score in recommendations:
                     if item_id not in all_recommendations:
                         all_recommendations[item_id] = 0.0
 
-                    # 如果有时间权重信息，应用到分数上
-                    time_weight_multiplier = user_time_weights.get(item_id, 1.0) if user_time_weights else 1.0
-                    all_recommendations[item_id] += score * weight * time_weight_multiplier
+                    all_recommendations[item_id] += score * weight
 
                     # 如果这是来自content模型的推荐，收集标签信息
                     if name == 'content' and hasattr(model, 'item_metadata'):
@@ -261,9 +245,6 @@ class HybridRecommender(BaseRecommenderModel):
         sorted_items = sorted(all_recommendations.items(), key=lambda x: x[1], reverse=True)
 
         # 增强多样性和覆盖率的策略
-        diversity_factor = getattr(self, 'diversity_factor', 0.3)  # 默认多样性因子
-
-        # 1. 先选择一些顶级推荐
         selected_items = []
         selected_ids = set()
         selected_tags = set()
@@ -279,63 +260,78 @@ class HybridRecommender(BaseRecommenderModel):
             if item_id in item_tags:
                 selected_tags.update(item_tags[item_id])
 
-        # 2. 然后选择来自不同模型的多样化推荐
-        # 每个模型轮流贡献推荐，偏好那些标签集与已选项不同的
-        remaining_slots = n - len(selected_items)
+        # 从每个模型中选择一些多样化推荐
+        # 优先选择不同模型提供的物品，以增加多样性
+        available_models = list(unique_items_by_model.keys())
 
-        # 如果有足够的剩余槽位，从每个模型中获取推荐
-        if remaining_slots > 0 and model_recommendations:
-            # 计算每个模型应该贡献的项目数（至少1个）
-            models_with_recs = [name for name, recs in model_recommendations.items() if recs]
-            items_per_model = max(1, remaining_slots // len(models_with_recs))
+        # 按权重排序模型，确保从高权重模型开始
+        available_models.sort(key=lambda m: self.weights.get(m, 0), reverse=True)
 
-            # 轮流从每个模型中选择
-            for name in models_with_recs:
-                model_items = 0
+        # 每个模型轮流贡献物品
+        for name in available_models:
+            # 跳过已经处理的模型
+            if not unique_items_by_model[name]:
+                continue
 
-                for item_id, score in model_recommendations[name]:
-                    # 跳过已选物品
-                    if item_id in selected_ids:
-                        continue
+            # 从当前模型的物品中选择最具多样性的物品
+            model_items = [(item_id, score) for item_id, score in model_recommendations[name]
+                           if item_id not in selected_ids]
 
-                    # 计算多样性分数
-                    diversity_score = 1.0
-                    if item_id in item_tags and selected_tags:
-                        # 计算与已选标签的重叠度
-                        overlap = len(item_tags[item_id].intersection(selected_tags))
-                        total = len(item_tags[item_id].union(selected_tags))
-                        if total > 0:
-                            similarity = overlap / total
-                            diversity_score = 1.0 - similarity
+            if not model_items:
+                continue
 
-                    # 调整分数以反映多样性
-                    adjusted_score = score * (1.0 + diversity_factor * diversity_score)
+            # 计算每个物品的多样性分数
+            diverse_items = []
 
-                    # 添加到已选项
-                    selected_items.append((item_id, adjusted_score))
+            for item_id, base_score in model_items:
+                # 计算与已选物品的多样性
+                diversity_score = 1.0  # 默认完全多样
+
+                if item_id in item_tags and selected_tags:
+                    # 计算标签重叠
+                    item_tag_set = item_tags[item_id]
+                    overlap = len(item_tag_set.intersection(selected_tags))
+                    if overlap > 0 and len(item_tag_set) > 0:
+                        similarity = overlap / len(item_tag_set)
+                        diversity_score = 1.0 - similarity
+
+                # 计算调整后的分数
+                adjusted_score = base_score * (1.0 + diversity_factor * diversity_score)
+                diverse_items.append((item_id, adjusted_score))
+
+            # 按调整后的分数排序
+            diverse_items.sort(key=lambda x: x[1], reverse=True)
+
+            # 添加这个模型的前2个多样性物品
+            items_to_add = min(2, len(diverse_items))
+            for i in range(items_to_add):
+                item_id, score = diverse_items[i]
+                if item_id not in selected_ids:
+                    selected_items.append((item_id, score))
                     selected_ids.add(item_id)
 
-                    # 更新已选标签
+                    # 更新标签集合
                     if item_id in item_tags:
                         selected_tags.update(item_tags[item_id])
 
-                    # 限制每个模型的贡献
-                    model_items += 1
-                    if model_items >= items_per_model or len(selected_items) >= n:
+                    # 如果已经有足够的推荐，停止添加
+                    if len(selected_items) >= n:
                         break
 
-                # 检查是否已经选择了足够多的项目
-                if len(selected_items) >= n:
-                    break
+            # 如果已经有足够的推荐，停止添加
+            if len(selected_items) >= n:
+                break
 
-        # 3. 如果仍然没有足够的推荐，从排序列表中添加更多
-        while len(selected_items) < n and len(sorted_items) > len(selected_ids):
+        # 如果仍然没有足够的推荐，从排序列表中添加更多
+        remaining = n - len(selected_items)
+        if remaining > 0:
             for item_id, score in sorted_items:
                 if item_id not in selected_ids:
                     selected_items.append((item_id, score))
                     selected_ids.add(item_id)
 
-                    if len(selected_items) >= n:
+                    remaining -= 1
+                    if remaining <= 0:
                         break
 
         # 重新排序最终结果
@@ -483,8 +479,13 @@ class HybridRecommender(BaseRecommenderModel):
             logger.error(f"Error loading hybrid recommender: {str(e)}")
             return None
 
+    # In Py_GetModel_src/models/hybrid_model.py
+    # Update the get_cold_start_recommendations method:
+
+    # 修改Py_GetModel_src/models/hybrid_model.py中的get_cold_start_recommendations方法
+
     def get_cold_start_recommendations(self, user_id, n=10):
-        """Generate recommendations for cold start users
+        """Enhanced cold start recommendations for extremely sparse data
 
         Args:
             user_id: User ID
@@ -495,140 +496,94 @@ class HybridRecommender(BaseRecommenderModel):
         """
         logger.info(f"Generating enhanced cold start recommendations for user {user_id}")
 
+        recommendations = []
+
         try:
-            # 1. 尝试基于有限用户信息构建推荐
-            limited_info_available = False
-            tag_based_recs = {}
+            # 1. 首先尝试使用流行度模型
+            if 'popularity' in self.models:
+                pop_model = self.models['popularity']
+                pop_recs = pop_model.recommend(user_id, n)
 
-            # 检查是否有基本用户信息
-            if hasattr(self, 'user_data') and user_id in self.user_data:
-                user_info = self.user_data[user_id]
-                limited_info_available = True
+                if pop_recs and len(pop_recs) > 0:
+                    # 存储流行度推荐
+                    recommendations.extend(pop_recs[:int(n / 2)])
 
-                # 基于用户标签偏好推荐
-                if 'top_tags' in user_info and user_info['top_tags']:
-                    user_tags = set(user_info['top_tags'])
+            # 2. 从内容模型获取多样化推荐
+            if 'content' in self.models and len(recommendations) < n:
+                content_model = self.models['content']
 
-                    # 从content模型获取游戏标签信息
-                    if 'content' in self.models:
-                        content_model = self.models['content']
+                # 如果内容模型有item_metadata
+                if hasattr(content_model, 'item_metadata') and content_model.item_metadata:
+                    # 收集并分组所有标签
+                    tag_items = defaultdict(list)
 
-                        # 有两种可能的标签数据结构
-                        game_tags = {}
-                        if hasattr(content_model, 'game_tags'):
-                            game_tags = content_model.game_tags
-                        elif hasattr(content_model, 'item_metadata'):
-                            # 从metadata中提取标签
-                            for game_id, metadata in content_model.item_metadata.items():
-                                if 'tags' in metadata:
-                                    game_tags[game_id] = set(metadata['tags']) if isinstance(metadata['tags'],
-                                                                                             list) else set()
+                    for item_id, metadata in content_model.item_metadata.items():
+                        if 'tags' in metadata and metadata['tags']:
+                            for tag in metadata['tags']:
+                                tag_items[tag].append(item_id)
 
-                        # 基于标签匹配计算推荐
-                        if game_tags:
-                            for game_id, pop_score in self.popular_items:
-                                if game_id in game_tags:
-                                    game_tag_set = game_tags[game_id]
+                    # 选择多样化的标签和游戏
+                    selected_items = {item_id for item_id, _ in recommendations}
 
-                                    # 计算标签交集
-                                    matching_tags = user_tags.intersection(game_tag_set)
+                    # 按标签流行度排序
+                    popular_tags = sorted(tag_items.items(), key=lambda x: len(x[1]), reverse=True)
 
-                                    if matching_tags:
-                                        # 计算标签匹配比例
-                                        match_ratio = len(matching_tags) / len(user_tags)
-                                        # 结合流行度和标签匹配度
-                                        tag_based_recs[game_id] = pop_score * (0.7 + 0.3 * match_ratio)
-
-            # 2. 增加多样性推荐
-            diverse_recs = {}
-
-            # 从流行游戏中选择多样化的游戏
-            if self.popular_items:
-                # 按类别标签分组
-                tag_to_games = {}
-
-                # 收集标签信息
-                for game_id, _ in self.popular_items:
-                    game_tags = []
-
-                    # 尝试从各种可能的来源获取标签
-                    if 'content' in self.models:
-                        content_model = self.models['content']
-                        if hasattr(content_model, 'game_tags') and game_id in content_model.game_tags:
-                            game_tags = content_model.game_tags[game_id]
-                        elif hasattr(content_model, 'item_metadata') and game_id in content_model.item_metadata:
-                            metadata = content_model.item_metadata[game_id]
-                            if 'tags' in metadata:
-                                game_tags = metadata['tags']
-
-                    # 添加到标签映射
-                    for tag in game_tags:
-                        if tag not in tag_to_games:
-                            tag_to_games[tag] = []
-                        tag_to_games[tag].append(game_id)
-
-                # 从每个主要标签中选择顶级游戏
-                if tag_to_games:
-                    # 按包含游戏数量排序的主要标签
-                    sorted_tags = sorted(tag_to_games.items(), key=lambda x: len(x[1]), reverse=True)
-                    top_tags = [tag for tag, _ in sorted_tags[:min(10, len(sorted_tags))]]
-
-                    # 为每个顶级标签选择最流行的游戏
-                    for tag in top_tags:
-                        games = tag_to_games[tag]
-                        # 找到该标签下最流行的游戏
-                        best_game = None
-                        best_score = 0
-
-                        for game_id in games:
-                            # 在流行物品列表中查找
-                            for pop_game, pop_score in self.popular_items:
-                                if pop_game == game_id and pop_score > best_score:
-                                    best_game = game_id
-                                    best_score = pop_score
-
-                        if best_game and best_game not in diverse_recs:
-                            diverse_recs[best_game] = best_score * 0.7  # 降低权重以平衡各种游戏
-
-            # 3. 合并基于标签和多样性的推荐
-            final_recs = {}
-
-            # 先添加基于标签的推荐（如果有）
-            if tag_based_recs:
-                # 按分数排序
-                sorted_tag_recs = sorted(tag_based_recs.items(), key=lambda x: x[1], reverse=True)
-                # 添加前n/2个
-                for i in range(min(n // 2, len(sorted_tag_recs))):
-                    game_id, score = sorted_tag_recs[i]
-                    final_recs[game_id] = score
-
-            # 添加多样性推荐
-            if diverse_recs:
-                sorted_diverse = sorted(diverse_recs.items(), key=lambda x: x[1], reverse=True)
-                for game_id, score in sorted_diverse:
-                    if game_id not in final_recs:
-                        final_recs[game_id] = score
-
-                        # 当我们有足够多的推荐时停止
-                        if len(final_recs) >= n:
+                    # 从每个流行标签中选择一个游戏
+                    for tag, items in popular_tags[:min(10, len(popular_tags))]:
+                        if len(recommendations) >= n:
                             break
 
-            # 4. 如果仍然不够，添加流行游戏
-            if len(final_recs) < n:
-                for game_id, score in self.popular_items:
-                    if game_id not in final_recs:
-                        final_recs[game_id] = score
+                        # 尝试在这个标签中找到一个还未选择的游戏
+                        for item_id in items:
+                            if item_id not in selected_items:
+                                # 寻找此游戏在流行游戏列表中的分数
+                                score = 0.5  # 默认分数
+                                for pop_id, pop_score in self.popular_items:
+                                    if pop_id == item_id:
+                                        score = pop_score
+                                        break
 
-                        if len(final_recs) >= n:
+                                recommendations.append((item_id, score))
+                                selected_items.add(item_id)
+                                break
+
+            # 3. 如果仍需要更多推荐，添加物品KNN模型的推荐
+            if 'item_knn' in self.models and len(recommendations) < n:
+                item_knn = self.models['item_knn']
+
+                # 从物品KNN模型获取推荐
+                knn_recs = item_knn.recommend(user_id, n)
+
+                if knn_recs and len(knn_recs) > 0:
+                    # 添加KNN推荐，确保不重复
+                    selected_ids = {item_id for item_id, _ in recommendations}
+
+                    for item_id, score in knn_recs:
+                        if item_id not in selected_ids and len(recommendations) < n:
+                            recommendations.append((item_id, score))
+                            selected_ids.add(item_id)
+
+            # 4. 最后，确保我们有足够的推荐，如果需要，添加流行游戏
+            if len(recommendations) < n:
+                selected_ids = {item_id for item_id, _ in recommendations}
+
+                for item_id, score in self.popular_items:
+                    if item_id not in selected_ids:
+                        recommendations.append((item_id, score))
+                        selected_ids.add(item_id)
+
+                        if len(recommendations) >= n:
                             break
 
-            # 转换为列表格式并排序
-            final_recommendations = sorted(final_recs.items(), key=lambda x: x[1], reverse=True)
-
-            return final_recommendations[:n]
+            # 排序并返回
+            recommendations.sort(key=lambda x: x[1], reverse=True)
+            return recommendations[:n]
 
         except Exception as e:
-            logger.error(f"Error generating cold start recommendations: {str(e)}")
+            logger.error(f"Error in enhanced cold start: {str(e)}")
             logger.error(traceback.format_exc())
-            # 简单回退到流行游戏
-            return self.popular_items[:n]
+            # 始终返回自己的推荐或流行游戏
+            if len(recommendations) >= n / 2:
+                return recommendations[:n]
+            else:
+                return self.popular_items[:n]

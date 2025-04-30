@@ -10,12 +10,12 @@
   },
   "knn_params": {
     "user_neighbors": 30,
-    "item_neighbors": 30,
+    "item_neighbors": 5,
     "metric": "cosine",
     "algorithm": "brute"
   },
   "svd_params": {
-    "n_components": 20,
+    "n_components": 50,
     "random_state": 42
   },
   "tag_embedding_dim": 50,

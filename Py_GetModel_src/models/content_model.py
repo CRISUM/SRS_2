@@ -188,8 +188,30 @@ class ContentBasedModel(BaseRecommenderModel):
                     # Create game similarity dictionary
                     game_similarities = {}
                     for i, game_id in enumerate(all_game_ids):
-                        similar_games = [(all_game_ids[j], tag_similarity[i, j])
-                                         for j in range(len(all_game_ids)) if i != j]
+                        similar_games = []
+                        for j in range(len(all_game_ids)):
+                            if i == j:
+                                continue
+
+                            game1_tags = set(game_metadata[game_id].get('tags', []))
+                            game2_id = all_game_ids[j]
+                            game2_tags = set(game_metadata[game2_id].get('tags', []))
+
+                            # 计算Jaccard相似度
+                            if game1_tags and game2_tags:
+                                intersection = len(game1_tags.intersection(game2_tags))
+                                union = len(game1_tags.union(game2_tags))
+                                jaccard_sim = intersection / union if union > 0 else 0
+
+                                # 组合两种相似度，增加权重
+                                combined_sim = (tag_similarity[i, j] * 0.7) + (jaccard_sim * 0.3)
+
+                                similar_games.append((game2_id, combined_sim))
+                            else:
+                                similar_games.append((game2_id, tag_similarity[i, j]))
+
+                        similar_games.sort(key=lambda x: x[1], reverse=True)
+                        game_similarities[game_id] = similar_games
 
                         # 增强6: 提高相似游戏的多样性
                         # 根据标签种类进行简单聚类

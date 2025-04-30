@@ -26,6 +26,7 @@ from models.svd_model import SVDModel
 from models.sequence_model import SequenceRecommender
 from models.hybrid_model import HybridRecommender
 from models.content_model import ContentBasedModel
+from models.popularity_model import PopularityModel
 from evaluation.evaluator import RecommenderEvaluator
 from visualization.visualizer import RecommenderVisualizer
 
@@ -182,13 +183,6 @@ class SteamRecommender:
             item_knn.fit(train_df)
             self.models['item_knn'] = item_knn
 
-            # 2. Train SVD model
-            logger.info("Training SVD model...")
-            svd_model = SVDModel(n_components=self.config['svd_params']['n_components'],
-                                 random_state=self.config['svd_params']['random_state'])
-            svd_model.fit(train_df)
-            self.models['svd'] = svd_model
-
             # 3. Train game sequence model (replacing the user sequence model)
             logger.info("Training game sequence model...")
             # Create game sequence model optimized for sparse data
@@ -221,6 +215,15 @@ class SteamRecommender:
 
             self.models['content'] = content_model
 
+            # 5. Create popularity-based model for extremely sparse data scenarios
+            logger.info("Creating popularity-based model...")
+            popularity_model = PopularityModel(
+                time_decay_factor=self.config.get('time_decay_factor', 0.9),
+                diversity_factor=0.3
+            )
+            popularity_model.fit(train_df)
+            self.models['popularity'] = popularity_model
+
             # 5. Create hybrid recommender with adjusted weights for sparse data
             if all(model is not None for model in self.models.values()):
                 logger.info("Creating hybrid recommender with optimized weights...")
@@ -228,11 +231,10 @@ class SteamRecommender:
                 # Adjust weights for sparse data - increase weight for content and item-based models
                 # Reduce weight for user-based models that need rich user history
                 model_weights = {
-                    'user_knn': self.config.get('user_knn_weight', 0.15),  # Reduced from 0.25
-                    'item_knn': self.config.get('item_knn_weight', 0.30),  # Increased from 0.25
-                    'svd': self.config.get('svd_weight', 0.15),  # Reduced from 0.25
-                    'sequence': self.config.get('sequence_weight', 0.15),  # Increased from 0.125
-                    'content': self.config.get('content_weight', 0.25)  # Increased from 0.125
+                    'user_knn': self.config.get('user_knn_weight', 0.10),  # Further reduced
+                    'item_knn': self.config.get('item_knn_weight', 0.30),  # Keep same
+                    'sequence': self.config.get('sequence_weight', 0.10),  # Reduced
+                    'content': self.config.get('content_weight', 0.50)  # Significantly increased
                 }
 
                 self.hybrid_model = HybridRecommender(self.models, model_weights)
@@ -515,11 +517,10 @@ class SteamRecommender:
             else:
                 # Create hybrid model
                 model_weights = {
-                    'user_knn': self.config.get('user_knn_weight', 0.15),
-                    'item_knn': self.config.get('item_knn_weight', 0.30),
-                    'svd': self.config.get('svd_weight', 0.2),
-                    'sequence': self.config.get('sequence_weight', 0.15),
-                    'content': self.config.get('content_weight', 0.20)
+                    'user_knn': self.config.get('user_knn_weight', 0.10),  # Further reduced
+                    'item_knn': self.config.get('item_knn_weight', 0.30),  # Keep same
+                    'sequence': self.config.get('sequence_weight', 0.10),  # Reduced
+                    'content': self.config.get('content_weight', 0.50)  # Significantly increased
                 }
                 self.hybrid_model = HybridRecommender(self.models, model_weights)
                 self.hybrid_model.popular_items = popular_games
@@ -1007,9 +1008,12 @@ class SteamRecommender:
             logger.error(traceback.format_exc())
             return False
 
+    # In Py_GetModel_src/recommender.py
+    # Update the train_and_optimize method:
+
     def train_and_optimize(self):
-        """训练并优化推荐系统，包括所有增强策略"""
-        logger.info("Training and optimizing the recommendation system...")
+        """训练并优化推荐系统，专为极度稀疏数据场景进行优化"""
+        logger.info("Training and optimizing the recommendation system for extremely sparse data...")
 
         try:
             # 1. 首先加载和处理数据
@@ -1048,57 +1052,107 @@ class SteamRecommender:
                         f"Median={user_interaction_counts.median()}, "
                         f"Mean={user_interaction_counts.mean():.2f}")
 
-            # 用户交互分布直方图
-            if hasattr(self, 'visualizer'):
-                try:
-                    plt.figure(figsize=(10, 6))
-                    plt.hist(user_interaction_counts, bins=30, alpha=0.7)
-                    plt.title('User Interaction Distribution', fontsize=16)
-                    plt.xlabel('Number of Interactions', fontsize=14)
-                    plt.ylabel('Number of Users', fontsize=14)
-                    plt.grid(True, alpha=0.3)
-                    plt.savefig(os.path.join(self.visualizer.output_dir, 'user_interaction_distribution.png'),
-                                dpi=300, bbox_inches='tight')
-                    plt.close()
-                except Exception as e:
-                    logger.warning(f"Could not create user interaction histogram: {str(e)}")
+            # 3.2 记录正负样本比例（在有is_recommended列的情况下）
+            if 'is_recommended' in train_df.columns:
+                positive_samples = train_df['is_recommended'].sum()
+                negative_samples = len(train_df) - positive_samples
+                pos_neg_ratio = positive_samples / negative_samples if negative_samples > 0 else 0
+                logger.info(f"Positive samples: {positive_samples}, Negative samples: {negative_samples}, "
+                            f"Pos/Neg ratio: {pos_neg_ratio:.6f}")
 
-            # 4. 训练基础模型
-            logger.info("Training base recommendation models...")
-            success = self.train_models()
-            if not success:
-                logger.error("Failed to train models")
-                return False
+                # 如果比例极度不平衡，特别记录警告
+                if pos_neg_ratio < 0.01:
+                    logger.warning(f"Extremely imbalanced pos/neg ratio: {pos_neg_ratio:.6f}")
+                    logger.warning("Using specialized sparse data handling strategies")
 
-            # 5. 增强内容模型 - 明确记录日志
-            logger.info("Enhancing content-based model...")
-            if self.enhance_content_model():
-                logger.info("Content-based model enhanced successfully")
-            else:
-                logger.warning("Content-based model enhancement failed or skipped")
+                    # 加载优化的配置
+                    try:
+                        with open('recommender_model/updated_config.json', 'r') as f:
+                            sparse_config = json.load(f)
+                            # 更新配置
+                            self.config.update(sparse_config)
+                            logger.info("Loaded specialized sparse data configuration")
+                    except Exception as e:
+                        logger.warning(f"Could not load specialized config: {str(e)}")
 
-            # 6. 优化模型权重 - 确保执行并记录结果
-            logger.info("Optimizing model weights for data characteristics...")
-            if self.optimize_model_weights():
-                logger.info("Model weights optimized successfully")
+            # 4. 训练优化过的模型集
+            logger.info("Training optimized recommendation models for sparse data...")
 
-                # 检查权重是否实际更新
-                if hasattr(self.hybrid_model, 'weights'):
-                    logger.info(f"New model weights: {self.hybrid_model.weights}")
-                else:
-                    logger.warning("Hybrid model has no weights attribute after optimization")
-            else:
-                logger.warning("Model weight optimization failed or skipped")
+            # 4.1 创建内容模型（优先级最高）
+            logger.info("Creating enhanced content-based model...")
+            self.feature_extractor.create_game_embeddings(train_df)
+            content_sim = self.feature_extractor.get_similarity_matrix(self.feature_extractor.game_embeddings)
 
-            # 7. 增强多样性和覆盖率
-            logger.info("Improving recommendation diversity and coverage...")
-            if self.improve_diversity_and_coverage():
-                logger.info("Diversity and coverage improvements applied successfully")
-            else:
-                logger.warning("Diversity and coverage improvements failed or skipped")
+            # 使用增强的内容模型
+            from models.content_model import ContentBasedModel
+            content_model = ContentBasedModel(content_sim)
+            content_model.fit(train_df)
+            self.models['content'] = content_model
 
-            # 8. 评估推荐质量
-            logger.info("Evaluating recommendation quality...")
+            # 4.2 创建Item-KNN模型（保留但优化）
+            logger.info("Creating optimized Item-KNN model...")
+            from models.knn_model import KNNModel
+            item_knn = KNNModel(type='item',
+                                n_neighbors=self.config['knn_params']['item_neighbors'],
+                                metric=self.config['knn_params']['metric'],
+                                algorithm=self.config['knn_params']['algorithm'])
+            item_knn.fit(train_df)
+            self.models['item_knn'] = item_knn
+
+            # 4.3 创建简化的User-KNN模型（权重降低）
+            logger.info("Creating lightweight User-KNN model...")
+            user_knn = KNNModel(type='user',
+                                n_neighbors=self.config['knn_params']['user_neighbors'],
+                                metric=self.config['knn_params']['metric'],
+                                algorithm=self.config['knn_params']['algorithm'])
+            user_knn.fit(train_df)
+            self.models['user_knn'] = user_knn
+
+            # 4.4 创建简化的序列模型
+            logger.info("Creating simplified sequence model...")
+            from models.sequence_model import SequenceRecommender
+            sequence_model = SequenceRecommender(
+                hidden_dim=self.config['sequence_params']['hidden_dim'],
+                num_layers=self.config['sequence_params']['num_layers'],
+                dropout=self.config['sequence_params']['dropout'],
+                learning_rate=self.config['sequence_params']['learning_rate'],
+                batch_size=self.config['sequence_params']['batch_size'],
+                epochs=self.config['sequence_params']['epochs'],
+                device=self.device
+            )
+            sequence_model.fit(train_df)
+            self.models['sequence'] = sequence_model
+
+            # 4.5 创建流行度模型（针对极度稀疏数据）
+            logger.info("Creating popularity-based model...")
+            from models.popularity_model import PopularityModel
+            popularity_model = PopularityModel(
+                time_decay_factor=self.config.get('time_decay_factor', 0.9),
+                diversity_factor=self.config.get('diversity_factor', 0.4)
+            )
+            popularity_model.fit(train_df)
+            self.models['popularity'] = popularity_model
+
+            # 4.6 创建混合模型（使用优化权重）
+            logger.info("Creating optimized hybrid model...")
+            model_weights = {
+                'user_knn': self.config.get('user_knn_weight', 0.10),
+                'item_knn': self.config.get('item_knn_weight', 0.30),
+                'content': self.config.get('content_weight', 0.50),
+                'sequence': self.config.get('sequence_weight', 0.05),
+                'popularity': self.config.get('popularity_weight', 0.05)
+            }
+
+            self.hybrid_model = HybridRecommender(self.models, model_weights)
+
+            # 设置多样性因子
+            self.hybrid_model.diversity_factor = self.config.get('diversity_factor', 0.4)
+
+            # 启用缓存以提高性能
+            self.hybrid_model.enable_cache = True
+
+            # 5. 评估优化后的模型
+            logger.info("Evaluating optimized recommendation system...")
             evaluation_results = self.evaluate_recommendations()
             if evaluation_results:
                 logger.info("Recommendation system evaluation results:")
@@ -1112,36 +1166,16 @@ class SteamRecommender:
             else:
                 logger.warning("Recommendation evaluation failed or returned no results")
 
-            # 9. 测试不同的KNN参数
-            logger.info("Testing different KNN parameters...")
-            if hasattr(self, 'test_knn_clustering'):
-                knn_results = self.test_knn_clustering(
-                    user_neighbors_range=[5, 10, 15, 20, 25, 30, 40],
-                    item_neighbors_range=[5, 10, 15, 20, 25, 30]
-                )
+            # 6. 可视化结果
+            if hasattr(self, 'visualizer'):
+                logger.info("Creating visualizations...")
+                self.visualize_results()
 
-                # 可视化KNN测试结果
-                if knn_results and hasattr(self.visualizer, 'visualize_knn_optimization'):
-                    self.visualizer.visualize_knn_optimization(knn_results)
-                elif knn_results:
-                    logger.info("KNN test completed but no visualization method available")
-                else:
-                    logger.warning("KNN parameter testing failed or returned no results")
-            else:
-                logger.warning("KNN testing method not available")
-
-            # 10. 创建可视化结果
-            logger.info("Creating visualizations...")
-            if self.visualize_results():
-                logger.info("Visualizations created successfully")
-            else:
-                logger.warning("Visualization creation failed or skipped")
-
-            logger.info("Recommendation system training and optimization completed successfully")
+            logger.info("Optimized recommendation system for sparse data trained successfully")
             return True
 
         except Exception as e:
-            logger.error(f"Error in training and optimization process: {str(e)}")
+            logger.error(f"Error in optimized training process: {str(e)}")
             logger.error(traceback.format_exc())
             return False
 
@@ -1191,15 +1225,15 @@ class SteamRecommender:
 
                     # 训练KNN模型
                     user_knn = KNNModel(type='user',
-                                        n_neighbors=u_neigh,
+                                        n_neighbors=min(15, self.config['knn_params']['user_neighbors']),  # 减少邻居数量
                                         metric=self.config['knn_params']['metric'],
                                         algorithm=self.config['knn_params']['algorithm'])
                     user_knn.fit(train_df)
 
                     item_knn = KNNModel(type='item',
-                                        n_neighbors=i_neigh,
-                                        metric=self.config['knn_params']['metric'],
-                                        algorithm=self.config['knn_params']['algorithm'])
+                                        n_neighbors=min(20, self.config['knn_params']['item_neighbors']),  # 减少邻居数量
+                                        metric='jaccard',  # 强制使用Jaccard相似度
+                                        algorithm='brute')  # 与Jaccard相似度一起使用brute算法
                     item_knn.fit(train_df)
 
                     # 创建临时混合模型仅包含KNN模型
@@ -1490,7 +1524,7 @@ class SteamRecommender:
 
             # 定义要测试的k值范围 - 减少测试范围，保证能生成一些结果
             knn_k_values = [5, 10, 15, 20, 30]  # 减少测试值的数量
-            svd_components = [20, 50, 100]
+            find_optimal_k_values = [20, 50, 100]
             recommender_k_values = [5, 10, 20]
 
             # 存储评估结果
@@ -1585,45 +1619,10 @@ class SteamRecommender:
             logger.info("测试不同的SVD组件数量...")
             svd_results = {}
 
-            for n_components in svd_components:
-                try:
-                    logger.info(f"测试SVD n_components={n_components}")
-                    svd_model = SVDModel(n_components=n_components,
-                                         random_state=self.config['svd_params']['random_state'])
-                    svd_model.fit(train_df)
-
-                    # 评估模型
-                    metrics = self.evaluator.evaluate(
-                        model=svd_model,
-                        test_df=test_df,
-                        k_values=[10]  # 使用NDCG@10作为主要指标
-                    )
-
-                    logger.info(f"SVD n_components={n_components} 评估结果: {metrics}")
-
-                    if metrics and 'ndcg' in metrics and 10 in metrics['ndcg']:
-                        ndcg_10 = metrics['ndcg'][10]
-                        svd_results[n_components] = ndcg_10
-                        logger.info(f"SVD n_components={n_components}, NDCG@10={ndcg_10:.4f}")
-                    else:
-                        logger.warning(f"SVD n_components={n_components} 未返回有效的NDCG@10指标")
-                except Exception as e:
-                    logger.warning(f"评估SVD n_components={n_components}时出错: {str(e)}")
-
-            # 找到最佳SVD组件数量 - 添加错误处理
-            if svd_results:
-                best_svd_components = max(svd_results.items(), key=lambda x: x[1])[0]
-                logger.info(
-                    f"最佳SVD组件数量: n_components={best_svd_components}, NDCG@10={svd_results[best_svd_components]:.4f}")
-            else:
-                logger.warning("没有获得任何SVD评估结果，使用默认值")
-                best_svd_components = self.config['svd_params']['n_components']
-
             # 组合最佳参数
             best_config = {
                 'user_knn_neighbors': best_user_knn_k,
                 'item_knn_neighbors': best_item_knn_k,
-                'svd_components': best_svd_components,
                 'best_k': 10,  # 默认使用10作为推荐数量
                 'results': {
                     'user_knn': user_knn_results,
@@ -1643,8 +1642,9 @@ class SteamRecommender:
             logger.error(traceback.format_exc())
             return None
 
+    # 在Py_GetModel_src/recommender.py中
     def _visualize_optimal_k_results(self, results):
-        """将最佳k值分析结果可视化
+        """可视化KNN测试结果,增强错误处理
 
         Args:
             results (dict): 包含最佳k值和评估结果的字典
@@ -1655,29 +1655,61 @@ class SteamRecommender:
             # 确保可视化目录存在
             os.makedirs(self.visualizer.output_dir, exist_ok=True)
 
+            # 安全的参数获取 - 处理可能不存在的键
+            best_user_k = results.get('user_knn_neighbors', 20)
+            best_item_k = results.get('item_knn_neighbors', 20)
+
+            # 安全获取结果字典
+            results_data = results.get('results', {})
+            user_knn_data = results_data.get('user_knn', {})
+            item_knn_data = results_data.get('item_knn', {})
+
+            # 验证数据存在且转换为合适的格式
+            if not isinstance(user_knn_data, dict) or not isinstance(item_knn_data, dict):
+                logger.warning("无效的KNN结果数据结构,跳过可视化")
+                return
+
+            # 确保键存在,否则使用默认值
+            if best_user_k not in user_knn_data:
+                logger.warning(f"找不到用户KNN k={best_user_k}的结果,使用第一个可用值")
+                if user_knn_data:
+                    best_user_k = list(user_knn_data.keys())[0]
+                else:
+                    logger.error("没有用户KNN结果可供可视化")
+                    return
+
+            if best_item_k not in item_knn_data:
+                logger.warning(f"找不到物品KNN k={best_item_k}的结果,使用第一个可用值")
+                if item_knn_data:
+                    best_item_k = list(item_knn_data.keys())[0]
+                else:
+                    logger.error("没有物品KNN结果可供可视化")
+                    return
+
+            # 安全获取分数
+            best_user_score = user_knn_data.get(best_user_k, 0)
+            best_item_score = item_knn_data.get(best_item_k, 0)
+
             # 1. KNN参数可视化
             plt.figure(figsize=(12, 6))
 
-            # 用户KNN结果
-            user_knn_k = list(results['results']['user_knn'].keys())
-            user_knn_scores = list(results['results']['user_knn'].values())
+            # 用户KNN结果 - 确保数据有效
+            if user_knn_data:
+                user_knn_k = list(user_knn_data.keys())
+                user_knn_scores = list(user_knn_data.values())
+                plt.plot(user_knn_k, user_knn_scores, 'o-', linewidth=2, markersize=8, label='User-KNN')
 
-            # 物品KNN结果
-            item_knn_k = list(results['results']['item_knn'].keys())
-            item_knn_scores = list(results['results']['item_knn'].values())
-
-            plt.plot(user_knn_k, user_knn_scores, 'o-', linewidth=2, markersize=8, label='User-KNN')
-            plt.plot(item_knn_k, item_knn_scores, 's-', linewidth=2, markersize=8, label='Item-KNN')
+            # 物品KNN结果 - 确保数据有效
+            if item_knn_data:
+                item_knn_k = list(item_knn_data.keys())
+                item_knn_scores = list(item_knn_data.values())
+                plt.plot(item_knn_k, item_knn_scores, 's-', linewidth=2, markersize=8, label='Item-KNN')
 
             # 标记最佳点
-            best_user_k = results['user_knn_neighbors']
-            best_user_score = results['results']['user_knn'][best_user_k]
-
-            best_item_k = results['item_knn_neighbors']
-            best_item_score = results['results']['item_knn'][best_item_k]
-
-            plt.scatter([best_user_k], [best_user_score], s=150, c='red', marker='*', label='Best User-KNN')
-            plt.scatter([best_item_k], [best_item_score], s=150, c='green', marker='*', label='Best Item-KNN')
+            if user_knn_data:
+                plt.scatter([best_user_k], [best_user_score], s=150, c='red', marker='*', label='Best User-KNN')
+            if item_knn_data:
+                plt.scatter([best_item_k], [best_item_score], s=150, c='green', marker='*', label='Best Item-KNN')
 
             plt.title('KNN Neighbors Optimization (NDCG@10)', fontsize=16)
             plt.xlabel('Number of Neighbors (k)', fontsize=14)
@@ -1689,75 +1721,15 @@ class SteamRecommender:
             plt.savefig(os.path.join(self.visualizer.output_dir, 'knn_optimization.png'), dpi=300, bbox_inches='tight')
             plt.close()
 
-            # 2. SVD组件数量可视化
-            plt.figure(figsize=(10, 6))
-
-            svd_components = list(results['results']['svd'].keys())
-            svd_scores = list(results['results']['svd'].values())
-
-            plt.plot(svd_components, svd_scores, 'o-', linewidth=2, markersize=8, color='purple')
-
-            # 标记最佳点
-            best_svd = results['svd_components']
-            best_svd_score = results['results']['svd'][best_svd]
-
-            plt.scatter([best_svd], [best_svd_score], s=150, c='red', marker='*')
-            plt.annotate(f'Best: {best_svd} components\nNDCG@10: {best_svd_score:.4f}',
-                         xy=(best_svd, best_svd_score),
-                         xytext=(best_svd + 10, best_svd_score - 0.02),
-                         arrowprops=dict(arrowstyle='->'))
-
-            plt.title('SVD Components Optimization (NDCG@10)', fontsize=16)
-            plt.xlabel('Number of Components', fontsize=14)
-            plt.ylabel('NDCG@10', fontsize=14)
-            plt.grid(True, alpha=0.3)
-            plt.tight_layout()
-
-            plt.savefig(os.path.join(self.visualizer.output_dir, 'svd_optimization.png'), dpi=300, bbox_inches='tight')
-            plt.close()
-
-            # 3. 推荐数量(k)对不同指标的影响
-            plt.figure(figsize=(12, 8))
-
-            recommender_k = list(results['results']['recommender'].keys())
-            metrics = ['ndcg', 'precision', 'recall', 'diversity']
-            metric_names = ['NDCG', 'Precision', 'Recall', 'Diversity']
-            colors = ['#3366cc', '#dc3912', '#ff9900', '#109618']
-
-            for i, metric in enumerate(metrics):
-                values = [results['results']['recommender'][k][metric] for k in recommender_k]
-                plt.plot(recommender_k, values, 'o-', linewidth=2, markersize=8, label=metric_names[i], color=colors[i])
-
-            # 标记最佳k
-            best_k = results['best_k']
-            best_ndcg = results['results']['recommender'][best_k]['ndcg']
-
-            plt.axvline(x=best_k, color='red', linestyle='--', alpha=0.7)
-            plt.annotate(f'Best k: {best_k}\nNDCG: {best_ndcg:.4f}',
-                         xy=(best_k, best_ndcg),
-                         xytext=(best_k + 5, best_ndcg + 0.05),
-                         arrowprops=dict(arrowstyle='->'))
-
-            plt.title('Performance Metrics at Different Recommendation List Sizes', fontsize=16)
-            plt.xlabel('Number of Recommendations (k)', fontsize=14)
-            plt.ylabel('Metric Value', fontsize=14)
-            plt.grid(True, alpha=0.3)
-            plt.legend(fontsize=12)
-            plt.tight_layout()
-
-            plt.savefig(os.path.join(self.visualizer.output_dir, 'recommendation_k_optimization.png'), dpi=300,
-                        bbox_inches='tight')
-            plt.close()
-
             # 4. 创建一个汇总图表
             plt.figure(figsize=(12, 6))
 
             # 绘制条形图显示最佳参数
-            params = ['User-KNN\nNeighbors', 'Item-KNN\nNeighbors', 'SVD\nComponents', 'Best k']
-            values = [results['user_knn_neighbors'], results['item_knn_neighbors'],
-                      results['svd_components'], results['best_k']]
+            params = ['User-KNN\nNeighbors', 'Item-KNN\nNeighbors', 'Best k']
+            values = [results.get('user_knn_neighbors', 20), results.get('item_knn_neighbors', 20),
+                      results.get('best_k', 10)]
 
-            bars = plt.bar(params, values, color=['#3366cc', '#dc3912', '#ff9900', '#109618'])
+            bars = plt.bar(params, values, color=['#3366cc', '#dc3912', '#109618'])
 
             # 添加数值标签
             for bar in bars:
@@ -1806,7 +1778,6 @@ class SteamRecommender:
             # 更新配置
             self.config['knn_params']['user_neighbors'] = optimal_params['user_knn_neighbors']
             self.config['knn_params']['item_neighbors'] = optimal_params['item_knn_neighbors']
-            self.config['svd_params']['n_components'] = optimal_params['svd_components']
             self.config['n_recommendations'] = optimal_params['best_k']
 
             # 修改序列模型参数，改善训练问题
@@ -1818,7 +1789,7 @@ class SteamRecommender:
 
             logger.info(f"使用参数配置: User-KNN={optimal_params['user_knn_neighbors']}, "
                         f"Item-KNN={optimal_params['item_knn_neighbors']}, "
-                        f"SVD={optimal_params['svd_components']}, k={optimal_params['best_k']}, "
+                        f"k={optimal_params['best_k']}, "
                         f"Sequence-LR={self.config['sequence_params']['learning_rate']}")
 
             # 使用最佳参数训练模型

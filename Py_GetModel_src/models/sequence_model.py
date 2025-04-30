@@ -278,7 +278,7 @@ class SequenceRecommender(BaseRecommenderModel):
         Returns:
             self: Trained model
         """
-        logger.info("Training game sequence model...")
+        logger.info("Training simplified game sequence model...")
 
         try:
             # Handle different input formats
@@ -302,139 +302,28 @@ class SequenceRecommender(BaseRecommenderModel):
                                   for game_id, count in game_counts.items()]
             self.popular_games.sort(key=lambda x: x[1], reverse=True)
 
-            # Prepare training data
-            X, y = self._prepare_training_data(df, transitions)
+            # 简化: 不再使用神经网络，而是基于游戏转移概率
+            # 计算游戏转移概率矩阵
+            self.transition_probs = defaultdict(dict)
 
-            # 添加样本分析日志
-            pos_samples = np.sum(y == 1)
-            neg_samples = np.sum(y == 0)
-            logger.info(
-                f"样本分布: 正样本={pos_samples}, 负样本={neg_samples}, 正负比={pos_samples / max(1, neg_samples):.4f}")
+            for (game1, game2), count in transitions.items():
+                # 获取从game1出发的所有转移总数
+                total_transitions = sum(count for (g1, _), count in transitions.items() if g1 == game1)
 
-            # Check if we have enough transitions for training
-            if len(transitions) < 10 or X.shape[0] < 100:
-                logger.warning("Not enough game transitions for neural model training")
-                # Still store the transitions for rule-based recommendations
-                return self
+                # 计算条件概率 P(game2|game1)
+                if total_transitions > 0:
+                    self.transition_probs[game1][game2] = count / total_transitions
 
-            # Save for updating game data dictionary
+            # 保存游戏数据
             for game_id in df['app_id'].unique():
                 self.game_data[game_id] = {'id': game_id}
                 self.game_indices[game_id] = len(self.game_indices)
 
-            # Initialize neural network model
-            input_size = X.shape[1]
-
-            # 修改模型参数以解决loss波动问题
-            # 降低学习率
-            self.learning_rate = 0.0005  # 从0.001改为0.0005
-
-            # 修改模型结构，简化以避免过拟合
-            self.hidden_dim = min(self.hidden_dim, 64)  # 减小隐藏层尺寸
-            self.num_layers = min(self.num_layers, 1)  # 减少层数
-            self.dropout = max(self.dropout, 0.3)  # 增加dropout
-
-            self.model = GameSequenceModel(
-                num_features=input_size,
-                hidden_dim=self.hidden_dim,
-                num_layers=self.num_layers,
-                dropout=self.dropout
-            ).to(self.device)
-
-            # Setup optimizer and loss function with降低学习率
-            optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate, weight_decay=0.001)  # 添加L2正则化
-
-            # 添加类别权重以平衡样本
-            if pos_samples > 0 and neg_samples > 0:
-                pos_weight = torch.tensor(neg_samples / pos_samples).to(self.device)
-                criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-                logger.info(f"使用加权BCE损失，正样本权重={pos_weight.item():.4f}")
-            else:
-                criterion = nn.BCELoss()
-
-            # Convert to tensors
-            X_tensor = torch.FloatTensor(X).to(self.device)
-            y_tensor = torch.FloatTensor(y).to(self.device)
-
-            # 添加早停机制
-            best_loss = float('inf')
-            patience = 3
-            patience_counter = 0
-            early_stop = False
-
-            # Training loop
-            self.model.train()
-            for epoch in range(self.epochs):
-                # Mini-batch training
-                total_loss = 0
-                num_batches = 0
-
-                # Create random permutation for shuffling
-                indices = torch.randperm(len(X_tensor))
-
-                for i in range(0, len(X_tensor), self.batch_size):
-                    # Get batch indices
-                    batch_indices = indices[i:i + self.batch_size]
-
-                    # Get batch
-                    X_batch = X_tensor[batch_indices]
-                    y_batch = y_tensor[batch_indices]
-
-                    # Forward pass
-                    optimizer.zero_grad()
-                    outputs = self.model(X_batch)
-
-                    # Calculate loss
-                    loss = criterion(outputs, y_batch)
-                    total_loss += loss.item()
-
-                    # Backward pass
-                    loss.backward()
-
-                    # 梯度裁剪，防止梯度爆炸
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-
-                    optimizer.step()
-
-                    num_batches += 1
-
-                # Calculate average loss for epoch
-                epoch_loss = total_loss / num_batches if num_batches > 0 else 0
-                self.training_history['loss'].append(epoch_loss)
-                logger.info(f"Epoch {epoch + 1}/{self.epochs}, Loss: {epoch_loss:.4f}")
-
-                # 早停检查
-                if epoch_loss < best_loss:
-                    best_loss = epoch_loss
-                    patience_counter = 0
-                    # 保存最佳模型状态
-                    best_model_state = {k: v.cpu().detach().clone() for k, v in self.model.state_dict().items()}
-                else:
-                    patience_counter += 1
-                    logger.info(f"Loss did not improve, patience: {patience_counter}/{patience}")
-
-                if patience_counter >= patience:
-                    logger.info(f"Early stopping at epoch {epoch + 1}")
-                    early_stop = True
-                    break
-
-            # 如果启用了早停并且有最佳模型，恢复到最佳模型状态
-            if early_stop and 'best_model_state' in locals():
-                self.model.load_state_dict(best_model_state)
-                logger.info("Restored model to best state")
-
-            # Save default feature vector for cold start
-            self.default_features = np.mean(X, axis=0)
-
-            # Set model to evaluation mode
-            if self.model:
-                self.model.eval()
-
-            logger.info("Game sequence model training completed")
+            logger.info(f"Simplified game sequence model trained with {len(transitions)} game transitions")
             return self
 
         except Exception as e:
-            logger.error(f"Error training game sequence model: {str(e)}")
+            logger.error(f"Error training simplified game sequence model: {str(e)}")
             logger.error(traceback.format_exc())
             return self
 
@@ -522,102 +411,72 @@ class SequenceRecommender(BaseRecommenderModel):
         try:
             # Check if user has history
             if user_id not in self.user_history or not self.user_history[user_id]:
-                # logger.info(f"No history for user {user_id}, using popular items")
                 return self.popular_games[:n]
 
-            # Get user's history
-            user_games = self.user_history[user_id]
+            # Get user's recent games (last 3)
+            recent_games = self.user_history[user_id][-3:]
 
-            # Focus on recent games (last 3)
-            recent_games = user_games[-3:] if len(user_games) > 3 else user_games
-
-            # Collect candidate items from transitions
+            # Collect candidate recommendations based on transition probabilities
             candidates = {}
 
-            # Try direct transitions first
             for game in recent_games:
-                # Add games that frequently follow this game
-                for next_game in self.game_sequences.get(game, []):
-                    # Skip games user already has
-                    if next_game in user_games:
-                        continue
+                if game in self.transition_probs:
+                    # Add games that frequently follow this game
+                    for next_game, prob in self.transition_probs[game].items():
+                        # Skip games user already has
+                        if next_game in self.user_history[user_id]:
+                            continue
 
-                    # Calculate transition score
-                    transition_count = self.game_transitions.get((game, next_game), 0)
-                    score = min(0.9, 0.5 + 0.1 * transition_count)
+                        # Update with highest probability
+                        candidates[next_game] = max(
+                            candidates.get(next_game, 0),
+                            min(0.95, prob)  # Cap at 0.95
+                        )
 
-                    # Update with highest score
-                    if next_game in candidates:
-                        candidates[next_game] = max(candidates[next_game], score)
-                    else:
-                        candidates[next_game] = score
-
-            # If not enough candidates, try neural model predictions
-            if self.model is not None and (len(candidates) < n * 2):
-                # Get most recent game
-                recent_game = recent_games[-1]
-
-                # Try neural predictions for all possible games
-                for game_id in self.game_data:
-                    # Skip games user already has or already in candidates
-                    if game_id in user_games or game_id in candidates:
-                        continue
-
-                    try:
-                        # Extract features
-                        features = self._extract_game_pair_features(recent_game, game_id)
-
-                        # Convert to tensor
-                        features_tensor = torch.FloatTensor(features).unsqueeze(0).to(self.device)
-
-                        # Make prediction
-                        with torch.no_grad():
-                            prediction = self.model(features_tensor).item()
-
-                        # Only add if prediction is significant
-                        if prediction > 0.6:
-                            candidates[game_id] = prediction
-                    except Exception as e:
-                        continue  # Skip errors in neural prediction
-
-            # If still not enough candidates, add popular games
+            # If not enough candidates, add popular games
             if len(candidates) < n:
-                for game_id, popularity in self.popular_games:
-                    if game_id not in user_games and game_id not in candidates:
-                        candidates[game_id] = 0.3 + (0.4 * popularity)  # Lower score for popular recommendations
+                for game_id, pop in self.popular_games:
+                    if game_id not in self.user_history[user_id] and game_id not in candidates:
+                        # Use scaled popularity as score
+                        candidates[game_id] = 0.3 + (0.4 * pop)
 
-                        if len(candidates) >= n * 1.5:
+                        if len(candidates) >= n * 2:
                             break
 
-            # Sort candidates by score
+            # Sort candidates by score and add diversity
             sorted_candidates = sorted(candidates.items(), key=lambda x: x[1], reverse=True)
 
-            # Add diversity: ensure we don't recommend too many similar games
-            # Select top N ensuring diversity
+            # Add diversity by avoiding too similar games
             selected = []
             selected_ids = set()
 
-            for game_id, score in sorted_candidates:
-                # Skip if we've selected enough
+            # First select top recommendations
+            top_k = max(1, n // 3)
+            for i in range(min(top_k, len(sorted_candidates))):
+                game_id, score = sorted_candidates[i]
+                selected.append((game_id, score))
+                selected_ids.add(game_id)
+
+            # Then add diverse recommendations
+            for game_id, score in sorted_candidates[top_k:]:
                 if len(selected) >= n:
                     break
 
                 # Check if too similar to already selected games
                 too_similar = False
                 for sel_id, _ in selected:
-                    # Check transition relationship
-                    if ((sel_id, game_id) in self.game_transitions or
-                            (game_id, sel_id) in self.game_transitions):
-                        # If direct transition exists, might be too similar
+                    # If direct transition exists in either direction, might be too similar
+                    if (sel_id in self.transition_probs and game_id in self.transition_probs[sel_id]) or \
+                            (game_id in self.transition_probs and sel_id in self.transition_probs[game_id]):
                         too_similar = True
                         break
 
                 # Add if not too similar or if we need more recommendations
-                if not too_similar or len(selected) < n / 2:
+                if not too_similar or len(selected) < n * 2 / 3:
                     selected.append((game_id, score))
                     selected_ids.add(game_id)
 
-            # If we don't have enough diverse recommendations, add more from candidates
+            # Fill remaining slots with other candidates if needed
             if len(selected) < n:
                 for game_id, score in sorted_candidates:
                     if game_id not in selected_ids:
@@ -627,13 +486,13 @@ class SequenceRecommender(BaseRecommenderModel):
                         if len(selected) >= n:
                             break
 
-            return selected
+            return selected[:n]
 
         except Exception as e:
-            logger.error(f"Error in game sequence recommendation: {str(e)}")
+            logger.error(f"Error generating sequence recommendations: {str(e)}")
             logger.error(traceback.format_exc())
             return self.popular_games[:n]
-
+        
     def _extract_game_pair_features(self, game1, game2):
         """Extract features for a pair of games
 
