@@ -54,12 +54,19 @@ class RecommenderEvaluator:
 
                 # 如果用户数量足够，随机选择100个用户
                 if len(users_with_recommendations) > 0:
-                    sample_size = min(200, len(users_with_recommendations))
+                    sample_size = min(100, len(users_with_recommendations))
                     test_users = np.random.choice(users_with_recommendations, sample_size, replace=False)
                     logger.info(f"Selected {len(test_users)} test users randomly from users with recommendations")
                 else:
-                    logger.warning("No users with recommendations found in test data")
-                    return None
+                    # 如果没有推荐用户，则随机选择一些用户
+                    logger.warning("No users with recommendations found, selecting random users")
+                    all_users = test_df['user_id'].unique()
+                    sample_size = min(100, len(all_users))
+                    test_users = np.random.choice(all_users, sample_size, replace=False) if len(all_users) > 0 else []
+
+                    if len(test_users) == 0:
+                        logger.error("No users available for testing")
+                        return None
 
             logger.info(f"Evaluating model with {len(test_users)} test users")
 
@@ -96,14 +103,25 @@ class RecommenderEvaluator:
                 max_k = max(k_values)
                 try:
                     recommendations = model.recommend(user_id, max_k)
+
+                    # 增加详细日志帮助调试
                     if not recommendations:
-                        # logger.warning(f"No recommendations generated for user {user_id}")
+                        logger.debug(f"No recommendations generated for user {user_id}")
                         continue
+                    elif len(recommendations) < max_k:
+                        logger.debug(
+                            f"Only {len(recommendations)} recommendations generated for user {user_id}, requested {max_k}")
 
                     recommended_items = [item_id for item_id, _ in recommendations]
                     successful_users += 1
+
+                    # 记录第一个成功用户的推荐详情，帮助调试
+                    if successful_users == 1:
+                        logger.debug(f"First successful recommendation for user {user_id}: {recommendations[:3]}...")
+
                 except Exception as e:
                     logger.error(f"Error getting recommendations for user {user_id}: {str(e)}")
+                    logger.error(traceback.format_exc())
                     continue
 
                 # 更新覆盖率跟踪
@@ -111,6 +129,11 @@ class RecommenderEvaluator:
 
                 # 计算每个k值的指标
                 for k in k_values:
+                    # 确保我们有足够的推荐
+                    if len(recommendations) < k:
+                        logger.debug(f"Only {len(recommendations)} recommendations available for k={k}")
+                        continue
+
                     # 获取top-k推荐
                     top_k_items = recommended_items[:k]
 
@@ -150,7 +173,8 @@ class RecommenderEvaluator:
             for metric in ['precision', 'recall', 'ndcg', 'diversity']:
                 logger.info(f"{metric.capitalize()}:")
                 for k in k_values:
-                    logger.info(f"  @{k}: {results[metric][k]:.4f}")
+                    if k in results[metric]:
+                        logger.info(f"  @{k}: {results[metric][k]:.4f}")
 
             logger.info(f"Coverage: {results['coverage']:.4f}")
             logger.info(f"Successfully evaluated {successful_users} out of {len(test_users)} users")

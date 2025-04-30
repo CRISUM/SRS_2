@@ -36,15 +36,18 @@ class GameSequenceModel(nn.Module):
         self.num_layers = num_layers
         self.dropout = dropout
 
-        # Define model layers
+        # Define model layers with批归一化
         self.fc1 = nn.Linear(num_features, hidden_dim)
+        self.bn1 = nn.BatchNorm1d(hidden_dim)  # 添加批归一化
         self.relu = nn.ReLU()
         self.dropout_layer = nn.Dropout(dropout)
 
         # Create additional hidden layers if num_layers > 1
         self.hidden_layers = nn.ModuleList()
+        self.bn_layers = nn.ModuleList()  # 批归一化层
         for _ in range(num_layers - 1):
             self.hidden_layers.append(nn.Linear(hidden_dim, hidden_dim))
+            self.bn_layers.append(nn.BatchNorm1d(hidden_dim))
 
         # Output layer
         self.output = nn.Linear(hidden_dim, 1)
@@ -59,14 +62,20 @@ class GameSequenceModel(nn.Module):
         Returns:
             tensor: Predicted scores (0-1)
         """
-        # First layer
+        # First layer with批归一化
         x = self.fc1(x)
+        # 处理批量大小为1的情况
+        if x.size(0) > 1:
+            x = self.bn1(x)
         x = self.relu(x)
         x = self.dropout_layer(x)
 
         # Additional hidden layers
-        for layer in self.hidden_layers:
+        for i, layer in enumerate(self.hidden_layers):
             x = layer(x)
+            # 处理批量大小为1的情况
+            if x.size(0) > 1:
+                x = self.bn_layers[i](x)
             x = self.relu(x)
             x = self.dropout_layer(x)
 
@@ -75,7 +84,6 @@ class GameSequenceModel(nn.Module):
         x = self.sigmoid(x)
 
         return x.squeeze()
-
 
 class SequenceRecommender(BaseRecommenderModel):
     """Recommendation model using sequential game-to-game relationships
@@ -297,6 +305,12 @@ class SequenceRecommender(BaseRecommenderModel):
             # Prepare training data
             X, y = self._prepare_training_data(df, transitions)
 
+            # 添加样本分析日志
+            pos_samples = np.sum(y == 1)
+            neg_samples = np.sum(y == 0)
+            logger.info(
+                f"样本分布: 正样本={pos_samples}, 负样本={neg_samples}, 正负比={pos_samples / max(1, neg_samples):.4f}")
+
             # Check if we have enough transitions for training
             if len(transitions) < 10 or X.shape[0] < 100:
                 logger.warning("Not enough game transitions for neural model training")
@@ -310,6 +324,16 @@ class SequenceRecommender(BaseRecommenderModel):
 
             # Initialize neural network model
             input_size = X.shape[1]
+
+            # 修改模型参数以解决loss波动问题
+            # 降低学习率
+            self.learning_rate = 0.0005  # 从0.001改为0.0005
+
+            # 修改模型结构，简化以避免过拟合
+            self.hidden_dim = min(self.hidden_dim, 64)  # 减小隐藏层尺寸
+            self.num_layers = min(self.num_layers, 1)  # 减少层数
+            self.dropout = max(self.dropout, 0.3)  # 增加dropout
+
             self.model = GameSequenceModel(
                 num_features=input_size,
                 hidden_dim=self.hidden_dim,
@@ -317,13 +341,26 @@ class SequenceRecommender(BaseRecommenderModel):
                 dropout=self.dropout
             ).to(self.device)
 
-            # Setup optimizer and loss function
-            optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
-            criterion = nn.BCELoss()
+            # Setup optimizer and loss function with降低学习率
+            optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate, weight_decay=0.001)  # 添加L2正则化
+
+            # 添加类别权重以平衡样本
+            if pos_samples > 0 and neg_samples > 0:
+                pos_weight = torch.tensor(neg_samples / pos_samples).to(self.device)
+                criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+                logger.info(f"使用加权BCE损失，正样本权重={pos_weight.item():.4f}")
+            else:
+                criterion = nn.BCELoss()
 
             # Convert to tensors
             X_tensor = torch.FloatTensor(X).to(self.device)
             y_tensor = torch.FloatTensor(y).to(self.device)
+
+            # 添加早停机制
+            best_loss = float('inf')
+            patience = 3
+            patience_counter = 0
+            early_stop = False
 
             # Training loop
             self.model.train()
@@ -353,6 +390,10 @@ class SequenceRecommender(BaseRecommenderModel):
 
                     # Backward pass
                     loss.backward()
+
+                    # 梯度裁剪，防止梯度爆炸
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+
                     optimizer.step()
 
                     num_batches += 1
@@ -361,6 +402,26 @@ class SequenceRecommender(BaseRecommenderModel):
                 epoch_loss = total_loss / num_batches if num_batches > 0 else 0
                 self.training_history['loss'].append(epoch_loss)
                 logger.info(f"Epoch {epoch + 1}/{self.epochs}, Loss: {epoch_loss:.4f}")
+
+                # 早停检查
+                if epoch_loss < best_loss:
+                    best_loss = epoch_loss
+                    patience_counter = 0
+                    # 保存最佳模型状态
+                    best_model_state = {k: v.cpu().detach().clone() for k, v in self.model.state_dict().items()}
+                else:
+                    patience_counter += 1
+                    logger.info(f"Loss did not improve, patience: {patience_counter}/{patience}")
+
+                if patience_counter >= patience:
+                    logger.info(f"Early stopping at epoch {epoch + 1}")
+                    early_stop = True
+                    break
+
+            # 如果启用了早停并且有最佳模型，恢复到最佳模型状态
+            if early_stop and 'best_model_state' in locals():
+                self.model.load_state_dict(best_model_state)
+                logger.info("Restored model to best state")
 
             # Save default feature vector for cold start
             self.default_features = np.mean(X, axis=0)

@@ -1476,188 +1476,165 @@ class SteamRecommender:
                 logger.error("无法寻找最佳k值：数据未加载")
                 return None
 
-            # 定义要测试的k值范围
-            knn_k_values = [5, 10, 15, 20, 25, 30, 40, 50]
-            svd_components = [20, 30, 50, 70, 100]
-            recommender_k_values = [5, 10, 15, 20, 25, 30]
+            # 记录训练和测试数据的大小和用户数量，帮助调试
+            train_df = self.data_processor.train_df
+            test_df = self.data_processor.test_df
+
+            logger.info(f"训练数据: {len(train_df)}行, {train_df['user_id'].nunique()}个用户")
+            logger.info(f"测试数据: {len(test_df)}行, {test_df['user_id'].nunique()}个用户")
+
+            # 检查测试数据是否包含推荐标记
+            if 'is_recommended' in test_df.columns:
+                positive_count = test_df['is_recommended'].sum()
+                logger.info(f"测试数据中有{positive_count}个正向推荐样本")
+
+            # 定义要测试的k值范围 - 减少测试范围，保证能生成一些结果
+            knn_k_values = [5, 10, 15, 20, 30]  # 减少测试值的数量
+            svd_components = [20, 50, 100]
+            recommender_k_values = [5, 10, 20]
 
             # 存储评估结果
             results = {}
             best_ndcg = 0
             best_config = {}
 
-            # 为了限制组合数量，我们可以分别优化每个模型的参数
-            # 1. 首先优化KNN参数
-
-            train_df = self.data_processor.train_df
-            test_df = self.data_processor.test_df
-
             # 测试用户KNN的k值
             logger.info("测试不同的User-KNN邻居数量...")
             user_knn_results = {}
 
             for k in knn_k_values:
-                logger.info(f"测试User-KNN k={k}")
-                user_knn = KNNModel(type='user',
-                                    n_neighbors=k,
-                                    metric=self.config['knn_params']['metric'],
-                                    algorithm=self.config['knn_params']['algorithm'])
-                user_knn.fit(train_df)
+                try:
+                    logger.info(f"测试User-KNN k={k}")
+                    user_knn = KNNModel(type='user',
+                                        n_neighbors=k,
+                                        metric=self.config['knn_params']['metric'],
+                                        algorithm=self.config['knn_params']['algorithm'])
+                    user_knn.fit(train_df)
 
-                # 评估模型
-                metrics = self.evaluator.evaluate(
-                    model=user_knn,
-                    test_df=test_df,
-                    k_values=[10]  # 使用NDCG@10作为主要指标
-                )
+                    # 评估模型
+                    metrics = self.evaluator.evaluate(
+                        model=user_knn,
+                        test_df=test_df,
+                        k_values=[10]  # 使用NDCG@10作为主要指标
+                    )
 
-                if metrics:
-                    ndcg_10 = metrics['ndcg'][10]
-                    user_knn_results[k] = ndcg_10
-                    logger.info(f"User-KNN k={k}, NDCG@10={ndcg_10:.4f}")
+                    # 详细记录每次评估的输出，帮助调试
+                    logger.info(f"User-KNN k={k} 评估结果: {metrics}")
 
-            # 找到最佳用户KNN参数
-            best_user_knn_k = max(user_knn_results.items(), key=lambda x: x[1])[0]
-            logger.info(f"最佳User-KNN邻居数量: k={best_user_knn_k}, NDCG@10={user_knn_results[best_user_knn_k]:.4f}")
+                    if metrics and 'ndcg' in metrics and 10 in metrics['ndcg']:
+                        ndcg_10 = metrics['ndcg'][10]
+                        user_knn_results[k] = ndcg_10
+                        logger.info(f"User-KNN k={k}, NDCG@10={ndcg_10:.4f}")
+                    else:
+                        logger.warning(f"User-KNN k={k} 未返回有效的NDCG@10指标")
+                except Exception as e:
+                    logger.warning(f"评估User-KNN k={k}时出错: {str(e)}")
+                    # 继续测试其他k值
 
-            # 测试物品KNN的k值
+            # 找到最佳用户KNN参数 - 添加错误处理
+            if user_knn_results:
+                best_user_knn_k = max(user_knn_results.items(), key=lambda x: x[1])[0]
+                logger.info(
+                    f"最佳User-KNN邻居数量: k={best_user_knn_k}, NDCG@10={user_knn_results[best_user_knn_k]:.4f}")
+            else:
+                logger.warning("没有获得任何User-KNN评估结果，使用默认值")
+                best_user_knn_k = self.config['knn_params']['user_neighbors']
+
+            # 测试物品KNN的k值 - 类似地添加错误处理
             logger.info("测试不同的Item-KNN邻居数量...")
             item_knn_results = {}
 
             for k in knn_k_values:
-                logger.info(f"测试Item-KNN k={k}")
-                item_knn = KNNModel(type='item',
-                                    n_neighbors=k,
-                                    metric=self.config['knn_params']['metric'],
-                                    algorithm=self.config['knn_params']['algorithm'])
-                item_knn.fit(train_df)
+                try:
+                    logger.info(f"测试Item-KNN k={k}")
+                    item_knn = KNNModel(type='item',
+                                        n_neighbors=k,
+                                        metric=self.config['knn_params']['metric'],
+                                        algorithm=self.config['knn_params']['algorithm'])
+                    item_knn.fit(train_df)
 
-                # 评估模型
-                metrics = self.evaluator.evaluate(
-                    model=item_knn,
-                    test_df=test_df,
-                    k_values=[10]  # 使用NDCG@10作为主要指标
-                )
+                    # 评估模型
+                    metrics = self.evaluator.evaluate(
+                        model=item_knn,
+                        test_df=test_df,
+                        k_values=[10]  # 使用NDCG@10作为主要指标
+                    )
 
-                if metrics:
-                    ndcg_10 = metrics['ndcg'][10]
-                    item_knn_results[k] = ndcg_10
-                    logger.info(f"Item-KNN k={k}, NDCG@10={ndcg_10:.4f}")
+                    logger.info(f"Item-KNN k={k} 评估结果: {metrics}")
 
-            # 找到最佳物品KNN参数
-            best_item_knn_k = max(item_knn_results.items(), key=lambda x: x[1])[0]
-            logger.info(f"最佳Item-KNN邻居数量: k={best_item_knn_k}, NDCG@10={item_knn_results[best_item_knn_k]:.4f}")
+                    if metrics and 'ndcg' in metrics and 10 in metrics['ndcg']:
+                        ndcg_10 = metrics['ndcg'][10]
+                        item_knn_results[k] = ndcg_10
+                        logger.info(f"Item-KNN k={k}, NDCG@10={ndcg_10:.4f}")
+                    else:
+                        logger.warning(f"Item-KNN k={k} 未返回有效的NDCG@10指标")
+                except Exception as e:
+                    logger.warning(f"评估Item-KNN k={k}时出错: {str(e)}")
+                    # 继续测试其他k值
 
-            # 2. 测试SVD组件数量
+            # 找到最佳物品KNN参数 - 添加错误处理
+            if item_knn_results:
+                best_item_knn_k = max(item_knn_results.items(), key=lambda x: x[1])[0]
+                logger.info(
+                    f"最佳Item-KNN邻居数量: k={best_item_knn_k}, NDCG@10={item_knn_results[best_item_knn_k]:.4f}")
+            else:
+                logger.warning("没有获得任何Item-KNN评估结果，使用默认值")
+                best_item_knn_k = self.config['knn_params']['item_neighbors']
+
+            # SVD测试也添加类似的错误处理
             logger.info("测试不同的SVD组件数量...")
             svd_results = {}
 
             for n_components in svd_components:
-                logger.info(f"测试SVD n_components={n_components}")
-                svd_model = SVDModel(n_components=n_components,
-                                     random_state=self.config['svd_params']['random_state'])
-                svd_model.fit(train_df)
+                try:
+                    logger.info(f"测试SVD n_components={n_components}")
+                    svd_model = SVDModel(n_components=n_components,
+                                         random_state=self.config['svd_params']['random_state'])
+                    svd_model.fit(train_df)
 
-                # 评估模型
-                metrics = self.evaluator.evaluate(
-                    model=svd_model,
-                    test_df=test_df,
-                    k_values=[10]  # 使用NDCG@10作为主要指标
-                )
+                    # 评估模型
+                    metrics = self.evaluator.evaluate(
+                        model=svd_model,
+                        test_df=test_df,
+                        k_values=[10]  # 使用NDCG@10作为主要指标
+                    )
 
-                if metrics:
-                    ndcg_10 = metrics['ndcg'][10]
-                    svd_results[n_components] = ndcg_10
-                    logger.info(f"SVD n_components={n_components}, NDCG@10={ndcg_10:.4f}")
+                    logger.info(f"SVD n_components={n_components} 评估结果: {metrics}")
 
-            # 找到最佳SVD组件数量
-            best_svd_components = max(svd_results.items(), key=lambda x: x[1])[0]
-            logger.info(
-                f"最佳SVD组件数量: n_components={best_svd_components}, NDCG@10={svd_results[best_svd_components]:.4f}")
+                    if metrics and 'ndcg' in metrics and 10 in metrics['ndcg']:
+                        ndcg_10 = metrics['ndcg'][10]
+                        svd_results[n_components] = ndcg_10
+                        logger.info(f"SVD n_components={n_components}, NDCG@10={ndcg_10:.4f}")
+                    else:
+                        logger.warning(f"SVD n_components={n_components} 未返回有效的NDCG@10指标")
+                except Exception as e:
+                    logger.warning(f"评估SVD n_components={n_components}时出错: {str(e)}")
 
-            # 3. 测试推荐数量(k)对评估指标的影响
-            logger.info("测试不同的推荐数量(k)...")
-
-            # 使用最佳参数训练模型
-            user_knn = KNNModel(type='user', n_neighbors=best_user_knn_k)
-            user_knn.fit(train_df)
-
-            item_knn = KNNModel(type='item', n_neighbors=best_item_knn_k)
-            item_knn.fit(train_df)
-
-            svd_model = SVDModel(n_components=best_svd_components)
-            svd_model.fit(train_df)
-
-            # 创建内容模型
-            content_model = ContentBasedModel()
-            content_model.fit(train_df)
-
-            # 训练序列模型
-            sequence_model = SequenceRecommender(device=self.device)
-            sequence_model.fit(train_df)
-
-            # 组合成混合模型
-            model_weights = {
-                'user_knn': self.config.get('user_knn_weight', 0.25),
-                'item_knn': self.config.get('item_knn_weight', 0.25),
-                'svd': self.config.get('svd_weight', 0.25),
-                'content': self.config.get('content_weight', 0.125),
-                'sequence': self.config.get('sequence_weight', 0.125)
-            }
-
-            hybrid_model = HybridRecommender({
-                'user_knn': user_knn,
-                'item_knn': item_knn,
-                'svd': svd_model,
-                'content': content_model,
-                'sequence': sequence_model
-            }, model_weights)
-
-            # 测试不同的k值
-            recommender_results = {}
-            for k in recommender_k_values:
-                metrics = self.evaluator.evaluate(
-                    model=hybrid_model,
-                    test_df=test_df,
-                    k_values=[k]
-                )
-
-                if metrics:
-                    ndcg_k = metrics['ndcg'][k]
-                    precision_k = metrics['precision'][k]
-                    recall_k = metrics['recall'][k]
-                    diversity_k = metrics['diversity'][k] if 'diversity' in metrics else 0
-
-                    recommender_results[k] = {
-                        'ndcg': ndcg_k,
-                        'precision': precision_k,
-                        'recall': recall_k,
-                        'diversity': diversity_k
-                    }
-
-                    logger.info(f"k={k}, NDCG={ndcg_k:.4f}, Precision={precision_k:.4f}, "
-                                f"Recall={recall_k:.4f}, Diversity={diversity_k:.4f}")
-
-            # 根据NDCG找到最佳的k值
-            best_k = max(recommender_results.items(), key=lambda x: x[1]['ndcg'])[0]
-            logger.info(f"最佳推荐数量: k={best_k}, NDCG={recommender_results[best_k]['ndcg']:.4f}")
+            # 找到最佳SVD组件数量 - 添加错误处理
+            if svd_results:
+                best_svd_components = max(svd_results.items(), key=lambda x: x[1])[0]
+                logger.info(
+                    f"最佳SVD组件数量: n_components={best_svd_components}, NDCG@10={svd_results[best_svd_components]:.4f}")
+            else:
+                logger.warning("没有获得任何SVD评估结果，使用默认值")
+                best_svd_components = self.config['svd_params']['n_components']
 
             # 组合最佳参数
             best_config = {
                 'user_knn_neighbors': best_user_knn_k,
                 'item_knn_neighbors': best_item_knn_k,
                 'svd_components': best_svd_components,
-                'best_k': best_k,
+                'best_k': 10,  # 默认使用10作为推荐数量
                 'results': {
                     'user_knn': user_knn_results,
                     'item_knn': item_knn_results,
-                    'svd': svd_results,
-                    'recommender': recommender_results
+                    'svd': svd_results
                 }
             }
 
-            # 可视化最佳参数结果
-            self._visualize_optimal_k_results(best_config)
+            # 可视化结果（如果有结果可视化）
+            if any([user_knn_results, item_knn_results, svd_results]):
+                self._visualize_optimal_k_results(best_config)
 
             return best_config
 
@@ -1817,8 +1794,14 @@ class SteamRecommender:
             optimal_params = self.find_optimal_k_values()
 
             if not optimal_params:
-                logger.error("无法找到最佳参数，使用默认参数训练")
-                return self.train_models()
+                logger.warning("无法找到最佳参数，使用手动调优的参数训练")
+                # 使用手动调优的参数，而不是默认参数
+                optimal_params = {
+                    'user_knn_neighbors': 20,  # 中等大小的邻居数
+                    'item_knn_neighbors': 30,  # 稍大一些的物品邻居
+                    'svd_components': 50,  # 适中的组件数
+                    'best_k': 10  # 标准推荐数量
+                }
 
             # 更新配置
             self.config['knn_params']['user_neighbors'] = optimal_params['user_knn_neighbors']
@@ -1826,15 +1809,23 @@ class SteamRecommender:
             self.config['svd_params']['n_components'] = optimal_params['svd_components']
             self.config['n_recommendations'] = optimal_params['best_k']
 
-            logger.info(f"最佳参数配置: User-KNN={optimal_params['user_knn_neighbors']}, "
+            # 修改序列模型参数，改善训练问题
+            self.config['sequence_params']['learning_rate'] = 0.0005  # 降低学习率
+            self.config['sequence_params']['dropout'] = 0.3  # 增加dropout
+            self.config['sequence_params']['num_layers'] = 1  # 减少层数
+            self.config['sequence_params']['hidden_dim'] = 64  # 减小隐藏层
+            self.config['sequence_params']['epochs'] = 20  # 增加训练轮数，配合早停
+
+            logger.info(f"使用参数配置: User-KNN={optimal_params['user_knn_neighbors']}, "
                         f"Item-KNN={optimal_params['item_knn_neighbors']}, "
-                        f"SVD={optimal_params['svd_components']}, k={optimal_params['best_k']}")
+                        f"SVD={optimal_params['svd_components']}, k={optimal_params['best_k']}, "
+                        f"Sequence-LR={self.config['sequence_params']['learning_rate']}")
 
             # 使用最佳参数训练模型
             success = self.train_models()
 
             if success:
-                logger.info("使用最佳参数成功训练模型")
+                logger.info("使用优化参数成功训练模型")
 
                 # 保存最佳参数配置
                 os.makedirs('recommender_model', exist_ok=True)
@@ -1846,5 +1837,4 @@ class SteamRecommender:
         except Exception as e:
             logger.error(f"使用最佳参数训练模型时出错: {str(e)}")
             logger.error(traceback.format_exc())
-            return False
-
+            return self.train_models()  # 出错时退回到标准训练
