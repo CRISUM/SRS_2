@@ -232,7 +232,7 @@ class KNNModel(BaseRecommenderModel):
 
         # Check if user exists in the model
         if user_id not in self.user_indices:
-            logger.warning(f"User {user_id} not found in the model")
+            # logger.warning(f"User {user_id} not found in the model")
             return []
 
         try:

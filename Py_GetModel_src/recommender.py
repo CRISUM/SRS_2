@@ -1458,3 +1458,393 @@ class SteamRecommender:
         except Exception as e:
             logger.error(f"KNN测试结果可视化错误: {str(e)}")
             logger.error(traceback.format_exc())
+
+    def find_optimal_k_values(self):
+        """使用网格搜索方法找到最佳k值配置
+
+        该方法会测试不同的k值组合，并使用NDCG@10作为主要评估指标，
+        从而找到性能最佳的参数设置。
+
+        Returns:
+            dict: 包含最佳k值配置的字典
+        """
+        logger.info("开始寻找最佳k值配置...")
+
+        try:
+            # 检查数据是否已加载
+            if not hasattr(self.data_processor, 'train_df') or self.data_processor.train_df is None:
+                logger.error("无法寻找最佳k值：数据未加载")
+                return None
+
+            # 定义要测试的k值范围
+            knn_k_values = [5, 10, 15, 20, 25, 30, 40, 50]
+            svd_components = [20, 30, 50, 70, 100]
+            recommender_k_values = [5, 10, 15, 20, 25, 30]
+
+            # 存储评估结果
+            results = {}
+            best_ndcg = 0
+            best_config = {}
+
+            # 为了限制组合数量，我们可以分别优化每个模型的参数
+            # 1. 首先优化KNN参数
+
+            train_df = self.data_processor.train_df
+            test_df = self.data_processor.test_df
+
+            # 测试用户KNN的k值
+            logger.info("测试不同的User-KNN邻居数量...")
+            user_knn_results = {}
+
+            for k in knn_k_values:
+                logger.info(f"测试User-KNN k={k}")
+                user_knn = KNNModel(type='user',
+                                    n_neighbors=k,
+                                    metric=self.config['knn_params']['metric'],
+                                    algorithm=self.config['knn_params']['algorithm'])
+                user_knn.fit(train_df)
+
+                # 评估模型
+                metrics = self.evaluator.evaluate(
+                    model=user_knn,
+                    test_df=test_df,
+                    k_values=[10]  # 使用NDCG@10作为主要指标
+                )
+
+                if metrics:
+                    ndcg_10 = metrics['ndcg'][10]
+                    user_knn_results[k] = ndcg_10
+                    logger.info(f"User-KNN k={k}, NDCG@10={ndcg_10:.4f}")
+
+            # 找到最佳用户KNN参数
+            best_user_knn_k = max(user_knn_results.items(), key=lambda x: x[1])[0]
+            logger.info(f"最佳User-KNN邻居数量: k={best_user_knn_k}, NDCG@10={user_knn_results[best_user_knn_k]:.4f}")
+
+            # 测试物品KNN的k值
+            logger.info("测试不同的Item-KNN邻居数量...")
+            item_knn_results = {}
+
+            for k in knn_k_values:
+                logger.info(f"测试Item-KNN k={k}")
+                item_knn = KNNModel(type='item',
+                                    n_neighbors=k,
+                                    metric=self.config['knn_params']['metric'],
+                                    algorithm=self.config['knn_params']['algorithm'])
+                item_knn.fit(train_df)
+
+                # 评估模型
+                metrics = self.evaluator.evaluate(
+                    model=item_knn,
+                    test_df=test_df,
+                    k_values=[10]  # 使用NDCG@10作为主要指标
+                )
+
+                if metrics:
+                    ndcg_10 = metrics['ndcg'][10]
+                    item_knn_results[k] = ndcg_10
+                    logger.info(f"Item-KNN k={k}, NDCG@10={ndcg_10:.4f}")
+
+            # 找到最佳物品KNN参数
+            best_item_knn_k = max(item_knn_results.items(), key=lambda x: x[1])[0]
+            logger.info(f"最佳Item-KNN邻居数量: k={best_item_knn_k}, NDCG@10={item_knn_results[best_item_knn_k]:.4f}")
+
+            # 2. 测试SVD组件数量
+            logger.info("测试不同的SVD组件数量...")
+            svd_results = {}
+
+            for n_components in svd_components:
+                logger.info(f"测试SVD n_components={n_components}")
+                svd_model = SVDModel(n_components=n_components,
+                                     random_state=self.config['svd_params']['random_state'])
+                svd_model.fit(train_df)
+
+                # 评估模型
+                metrics = self.evaluator.evaluate(
+                    model=svd_model,
+                    test_df=test_df,
+                    k_values=[10]  # 使用NDCG@10作为主要指标
+                )
+
+                if metrics:
+                    ndcg_10 = metrics['ndcg'][10]
+                    svd_results[n_components] = ndcg_10
+                    logger.info(f"SVD n_components={n_components}, NDCG@10={ndcg_10:.4f}")
+
+            # 找到最佳SVD组件数量
+            best_svd_components = max(svd_results.items(), key=lambda x: x[1])[0]
+            logger.info(
+                f"最佳SVD组件数量: n_components={best_svd_components}, NDCG@10={svd_results[best_svd_components]:.4f}")
+
+            # 3. 测试推荐数量(k)对评估指标的影响
+            logger.info("测试不同的推荐数量(k)...")
+
+            # 使用最佳参数训练模型
+            user_knn = KNNModel(type='user', n_neighbors=best_user_knn_k)
+            user_knn.fit(train_df)
+
+            item_knn = KNNModel(type='item', n_neighbors=best_item_knn_k)
+            item_knn.fit(train_df)
+
+            svd_model = SVDModel(n_components=best_svd_components)
+            svd_model.fit(train_df)
+
+            # 创建内容模型
+            content_model = ContentBasedModel()
+            content_model.fit(train_df)
+
+            # 训练序列模型
+            sequence_model = SequenceRecommender(device=self.device)
+            sequence_model.fit(train_df)
+
+            # 组合成混合模型
+            model_weights = {
+                'user_knn': self.config.get('user_knn_weight', 0.25),
+                'item_knn': self.config.get('item_knn_weight', 0.25),
+                'svd': self.config.get('svd_weight', 0.25),
+                'content': self.config.get('content_weight', 0.125),
+                'sequence': self.config.get('sequence_weight', 0.125)
+            }
+
+            hybrid_model = HybridRecommender({
+                'user_knn': user_knn,
+                'item_knn': item_knn,
+                'svd': svd_model,
+                'content': content_model,
+                'sequence': sequence_model
+            }, model_weights)
+
+            # 测试不同的k值
+            recommender_results = {}
+            for k in recommender_k_values:
+                metrics = self.evaluator.evaluate(
+                    model=hybrid_model,
+                    test_df=test_df,
+                    k_values=[k]
+                )
+
+                if metrics:
+                    ndcg_k = metrics['ndcg'][k]
+                    precision_k = metrics['precision'][k]
+                    recall_k = metrics['recall'][k]
+                    diversity_k = metrics['diversity'][k] if 'diversity' in metrics else 0
+
+                    recommender_results[k] = {
+                        'ndcg': ndcg_k,
+                        'precision': precision_k,
+                        'recall': recall_k,
+                        'diversity': diversity_k
+                    }
+
+                    logger.info(f"k={k}, NDCG={ndcg_k:.4f}, Precision={precision_k:.4f}, "
+                                f"Recall={recall_k:.4f}, Diversity={diversity_k:.4f}")
+
+            # 根据NDCG找到最佳的k值
+            best_k = max(recommender_results.items(), key=lambda x: x[1]['ndcg'])[0]
+            logger.info(f"最佳推荐数量: k={best_k}, NDCG={recommender_results[best_k]['ndcg']:.4f}")
+
+            # 组合最佳参数
+            best_config = {
+                'user_knn_neighbors': best_user_knn_k,
+                'item_knn_neighbors': best_item_knn_k,
+                'svd_components': best_svd_components,
+                'best_k': best_k,
+                'results': {
+                    'user_knn': user_knn_results,
+                    'item_knn': item_knn_results,
+                    'svd': svd_results,
+                    'recommender': recommender_results
+                }
+            }
+
+            # 可视化最佳参数结果
+            self._visualize_optimal_k_results(best_config)
+
+            return best_config
+
+        except Exception as e:
+            logger.error(f"寻找最佳k值时出错: {str(e)}")
+            logger.error(traceback.format_exc())
+            return None
+
+    def _visualize_optimal_k_results(self, results):
+        """将最佳k值分析结果可视化
+
+        Args:
+            results (dict): 包含最佳k值和评估结果的字典
+        """
+        logger.info("可视化最佳参数分析结果...")
+
+        try:
+            # 确保可视化目录存在
+            os.makedirs(self.visualizer.output_dir, exist_ok=True)
+
+            # 1. KNN参数可视化
+            plt.figure(figsize=(12, 6))
+
+            # 用户KNN结果
+            user_knn_k = list(results['results']['user_knn'].keys())
+            user_knn_scores = list(results['results']['user_knn'].values())
+
+            # 物品KNN结果
+            item_knn_k = list(results['results']['item_knn'].keys())
+            item_knn_scores = list(results['results']['item_knn'].values())
+
+            plt.plot(user_knn_k, user_knn_scores, 'o-', linewidth=2, markersize=8, label='User-KNN')
+            plt.plot(item_knn_k, item_knn_scores, 's-', linewidth=2, markersize=8, label='Item-KNN')
+
+            # 标记最佳点
+            best_user_k = results['user_knn_neighbors']
+            best_user_score = results['results']['user_knn'][best_user_k]
+
+            best_item_k = results['item_knn_neighbors']
+            best_item_score = results['results']['item_knn'][best_item_k]
+
+            plt.scatter([best_user_k], [best_user_score], s=150, c='red', marker='*', label='Best User-KNN')
+            plt.scatter([best_item_k], [best_item_score], s=150, c='green', marker='*', label='Best Item-KNN')
+
+            plt.title('KNN Neighbors Optimization (NDCG@10)', fontsize=16)
+            plt.xlabel('Number of Neighbors (k)', fontsize=14)
+            plt.ylabel('NDCG@10', fontsize=14)
+            plt.grid(True, alpha=0.3)
+            plt.legend(fontsize=12)
+            plt.tight_layout()
+
+            plt.savefig(os.path.join(self.visualizer.output_dir, 'knn_optimization.png'), dpi=300, bbox_inches='tight')
+            plt.close()
+
+            # 2. SVD组件数量可视化
+            plt.figure(figsize=(10, 6))
+
+            svd_components = list(results['results']['svd'].keys())
+            svd_scores = list(results['results']['svd'].values())
+
+            plt.plot(svd_components, svd_scores, 'o-', linewidth=2, markersize=8, color='purple')
+
+            # 标记最佳点
+            best_svd = results['svd_components']
+            best_svd_score = results['results']['svd'][best_svd]
+
+            plt.scatter([best_svd], [best_svd_score], s=150, c='red', marker='*')
+            plt.annotate(f'Best: {best_svd} components\nNDCG@10: {best_svd_score:.4f}',
+                         xy=(best_svd, best_svd_score),
+                         xytext=(best_svd + 10, best_svd_score - 0.02),
+                         arrowprops=dict(arrowstyle='->'))
+
+            plt.title('SVD Components Optimization (NDCG@10)', fontsize=16)
+            plt.xlabel('Number of Components', fontsize=14)
+            plt.ylabel('NDCG@10', fontsize=14)
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+
+            plt.savefig(os.path.join(self.visualizer.output_dir, 'svd_optimization.png'), dpi=300, bbox_inches='tight')
+            plt.close()
+
+            # 3. 推荐数量(k)对不同指标的影响
+            plt.figure(figsize=(12, 8))
+
+            recommender_k = list(results['results']['recommender'].keys())
+            metrics = ['ndcg', 'precision', 'recall', 'diversity']
+            metric_names = ['NDCG', 'Precision', 'Recall', 'Diversity']
+            colors = ['#3366cc', '#dc3912', '#ff9900', '#109618']
+
+            for i, metric in enumerate(metrics):
+                values = [results['results']['recommender'][k][metric] for k in recommender_k]
+                plt.plot(recommender_k, values, 'o-', linewidth=2, markersize=8, label=metric_names[i], color=colors[i])
+
+            # 标记最佳k
+            best_k = results['best_k']
+            best_ndcg = results['results']['recommender'][best_k]['ndcg']
+
+            plt.axvline(x=best_k, color='red', linestyle='--', alpha=0.7)
+            plt.annotate(f'Best k: {best_k}\nNDCG: {best_ndcg:.4f}',
+                         xy=(best_k, best_ndcg),
+                         xytext=(best_k + 5, best_ndcg + 0.05),
+                         arrowprops=dict(arrowstyle='->'))
+
+            plt.title('Performance Metrics at Different Recommendation List Sizes', fontsize=16)
+            plt.xlabel('Number of Recommendations (k)', fontsize=14)
+            plt.ylabel('Metric Value', fontsize=14)
+            plt.grid(True, alpha=0.3)
+            plt.legend(fontsize=12)
+            plt.tight_layout()
+
+            plt.savefig(os.path.join(self.visualizer.output_dir, 'recommendation_k_optimization.png'), dpi=300,
+                        bbox_inches='tight')
+            plt.close()
+
+            # 4. 创建一个汇总图表
+            plt.figure(figsize=(12, 6))
+
+            # 绘制条形图显示最佳参数
+            params = ['User-KNN\nNeighbors', 'Item-KNN\nNeighbors', 'SVD\nComponents', 'Best k']
+            values = [results['user_knn_neighbors'], results['item_knn_neighbors'],
+                      results['svd_components'], results['best_k']]
+
+            bars = plt.bar(params, values, color=['#3366cc', '#dc3912', '#ff9900', '#109618'])
+
+            # 添加数值标签
+            for bar in bars:
+                height = bar.get_height()
+                plt.text(bar.get_x() + bar.get_width() / 2., height + 0.5,
+                         f'{int(height)}',
+                         ha='center', va='bottom', fontsize=12)
+
+            plt.title('Optimal Parameter Configuration', fontsize=16)
+            plt.ylabel('Parameter Value', fontsize=14)
+            plt.grid(axis='y', alpha=0.3)
+            plt.tight_layout()
+
+            plt.savefig(os.path.join(self.visualizer.output_dir, 'optimal_parameters.png'), dpi=300,
+                        bbox_inches='tight')
+            plt.close()
+
+        except Exception as e:
+            logger.error(f"可视化最佳参数结果时出错: {str(e)}")
+            logger.error(traceback.format_exc())
+
+    def train_with_optimal_parameters(self):
+        """使用找到的最佳参数训练模型
+
+        该方法会先找到最佳参数组合，然后使用这些参数训练一个优化的模型
+
+        Returns:
+            bool: 训练成功返回True，否则返回False
+        """
+        logger.info("使用最佳参数训练模型...")
+
+        try:
+            # 找到最佳参数
+            optimal_params = self.find_optimal_k_values()
+
+            if not optimal_params:
+                logger.error("无法找到最佳参数，使用默认参数训练")
+                return self.train_models()
+
+            # 更新配置
+            self.config['knn_params']['user_neighbors'] = optimal_params['user_knn_neighbors']
+            self.config['knn_params']['item_neighbors'] = optimal_params['item_knn_neighbors']
+            self.config['svd_params']['n_components'] = optimal_params['svd_components']
+            self.config['n_recommendations'] = optimal_params['best_k']
+
+            logger.info(f"最佳参数配置: User-KNN={optimal_params['user_knn_neighbors']}, "
+                        f"Item-KNN={optimal_params['item_knn_neighbors']}, "
+                        f"SVD={optimal_params['svd_components']}, k={optimal_params['best_k']}")
+
+            # 使用最佳参数训练模型
+            success = self.train_models()
+
+            if success:
+                logger.info("使用最佳参数成功训练模型")
+
+                # 保存最佳参数配置
+                os.makedirs('recommender_model', exist_ok=True)
+                with open(os.path.join('recommender_model', 'optimal_params.json'), 'w') as f:
+                    json.dump(optimal_params, f, indent=2)
+
+            return success
+
+        except Exception as e:
+            logger.error(f"使用最佳参数训练模型时出错: {str(e)}")
+            logger.error(traceback.format_exc())
+            return False
+

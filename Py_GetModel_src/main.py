@@ -32,7 +32,7 @@ def main():
     parser.add_argument('--model', type=str, default=None, help='Model path')
     parser.add_argument('--save-model', type=str, default='recommender_model', help='Model save path')
     parser.add_argument('--mode', type=str, default='train',
-                        choices=['train', 'recommend', 'evaluate', 'serve'],
+                        choices=['train', 'optimal-train', 'recommend', 'evaluate', 'serve'],
                         help='Operation mode')
     parser.add_argument('--topic', type=str, default='SGR_topic_0', help='Kafka topic')
     parser.add_argument('--max', type=int, default=None, help='Maximum message count')
@@ -64,6 +64,19 @@ def main():
             recommender.load_data()
             recommender.engineer_features()
             recommender.train_models()
+            recommender.evaluate_recommendations()
+            recommender.visualize_results()
+            recommender.save_model(args.save_model)
+        else:
+            logging.error("Training requires data file path")
+
+    # 在模式选择中添加最佳参数训练选项
+    elif args.mode == 'optimal-train':
+        # 训练模式 - 使用最佳参数
+        if args.data:
+            recommender.load_data()
+            recommender.engineer_features()
+            recommender.train_with_optimal_parameters()  # 使用最佳参数训练
             recommender.evaluate_recommendations()
             recommender.visualize_results()
             recommender.save_model(args.save_model)

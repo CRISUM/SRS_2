@@ -461,7 +461,7 @@ class SequenceRecommender(BaseRecommenderModel):
         try:
             # Check if user has history
             if user_id not in self.user_history or not self.user_history[user_id]:
-                logger.info(f"No history for user {user_id}, using popular items")
+                # logger.info(f"No history for user {user_id}, using popular items")
                 return self.popular_games[:n]
 
             # Get user's history

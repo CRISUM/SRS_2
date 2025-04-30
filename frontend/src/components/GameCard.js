@@ -31,7 +31,8 @@ const GameCard = ({ game, onAction, userActions, showScore }) => {
             className="w-full h-full object-cover"
             onError={(e) => {
               e.target.onerror = null;
-              e.target.src = "https://via.placeholder.com/460x215?text=Game+Image";
+              // Use a data URI for a simple colored rectangle instead of an external placeholder service
+              e.target.src = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='460' height='215' viewBox='0 0 460 215'%3E%3Crect width='460' height='215' fill='%23cccccc'/%3E%3Ctext x='50%25' y='50%25' font-family='Arial' font-size='20' text-anchor='middle' fill='%23666666' dominant-baseline='middle'%3E" + encodeURIComponent(game.title || "Game Image") + "%3C/text%3E%3C/svg%3E";
             }}
           />
         </div>

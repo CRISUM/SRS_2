@@ -98,17 +98,22 @@ def load_data():
             logger.warning(f"Games CSV not found at {GAMES_CSV}")
             games_df = None
 
-        # Load games metadata JSON
+        # Load games metadata JSON with explicit UTF-8 encoding
         logger.info(f"Loading games metadata from {GAMES_METADATA}")
         if os.path.exists(GAMES_METADATA):
-            with open(GAMES_METADATA, 'r') as f:
-                for line in f:
-                    try:
-                        game_data = json.loads(line.strip())
-                        games_metadata[game_data['app_id']] = game_data
-                    except json.JSONDecodeError:
-                        continue
-            logger.info(f"Loaded metadata for {len(games_metadata)} games")
+            try:
+                with open(GAMES_METADATA, 'r', encoding='utf-8') as f:  # Explicitly specify UTF-8 encoding
+                    for line in f:
+                        try:
+                            game_data = json.loads(line.strip())
+                            games_metadata[game_data['app_id']] = game_data
+                        except json.JSONDecodeError:
+                            continue
+                logger.info(f"Loaded metadata for {len(games_metadata)} games")
+            except Exception as e:
+                logger.error(f"Error loading games metadata: {str(e)}")
+                logger.error(traceback.format_exc())
+                games_metadata = {}
         else:
             logger.warning(f"Games metadata not found at {GAMES_METADATA}")
             games_metadata = {}
@@ -272,7 +277,6 @@ def get_game_info(game_id):
                 tags_value = first_row['tags']
 
                 # Check if it's not NA (avoiding the array truth value error)
-                print(tags_value)
                 if isinstance(tags_value, list) or (isinstance(tags_value, (str, float, int)) and pd.notna(tags_value)):
                     # Handle different tag formats
                     if isinstance(tags_value, list):
@@ -299,11 +303,21 @@ def get_game_info(game_id):
             else:
                 game_info['description'] = ""  # Default empty description
 
-            # Add other available info from DataFrame
-            for col in ['date_release', 'win', 'mac', 'linux', 'rating', 'positive_ratio', 'price_final',
-                        'price_original']:
+            # Add other available info from DataFrame - non-boolean columns
+            for col in ['date_release', 'rating', 'positive_ratio', 'price_final', 'price_original']:
                 if col in game_data.columns and pd.notna(first_row[col]):
                     game_info[col] = first_row[col]
+
+            # Handle boolean columns separately
+            for bool_col in ['win', 'mac', 'linux']:
+                if bool_col in game_data.columns and pd.notna(first_row[bool_col]):
+                    # Convert Python boolean to JSON-compatible boolean
+                    bool_value = first_row[bool_col]
+                    # Convert to a proper boolean if it's a string representation
+                    if isinstance(bool_value, str):
+                        bool_value = bool_value.lower() == 'true'
+                    # Now store it as a Python bool which Flask can properly serialize
+                    game_info[bool_col] = bool(bool_value)
 
             return game_info
 
@@ -317,11 +331,20 @@ def get_game_info(game_id):
             'description': metadata.get('description', '')
         }
 
-        # Add other available info
-        for key in ['date_release', 'win', 'mac', 'linux', 'rating', 'positive_ratio', 'price_final',
-                    'price_original']:
+        # Add other available info - handling non-boolean columns
+        for key in ['date_release', 'rating', 'positive_ratio', 'price_final', 'price_original']:
             if key in metadata:
                 game_info[key] = metadata[key]
+
+        # Handle boolean columns separately
+        for bool_col in ['win', 'mac', 'linux']:
+            if bool_col in metadata:
+                bool_value = metadata[bool_col]
+                # Convert string representations to proper booleans
+                if isinstance(bool_value, str):
+                    bool_value = bool_value.lower() == 'true'
+                # Store as a Python bool which Flask can properly serialize
+                game_info[bool_col] = bool(bool_value)
 
         return game_info
 
@@ -1067,12 +1090,27 @@ def custom_recommendations():
                 if len(game_rows) > 0:
                     # Get tags safely from the first row
                     first_row = game_rows.iloc[0]
-                    if 'tags' in first_row and pd.notna(first_row['tags']):
+
+                    # FIX: Check if 'tags' column exists in the dataframe
+                    if 'tags' in game_rows.columns:
+                        # Get the tags value for this specific row
                         tags_value = first_row['tags']
-                        if isinstance(tags_value, list):
-                            user_game_tags.update(tags_value)
-                        elif isinstance(tags_value, str):
-                            user_game_tags.update(tag.strip() for tag in tags_value.split(','))
+
+                        # IMPROVED FIX: Extra safety check for pandas Series
+                        # If tags_value is a Series, get the first value with .iloc[0]
+                        if isinstance(tags_value, pd.Series):
+                            # Check if Series is not empty before accessing first element
+                            if len(tags_value) > 0 and pd.notna(tags_value.iloc[0]):
+                                tags_value = tags_value.iloc[0]
+                            else:
+                                continue  # Skip if Series is empty or has NA
+
+                        # Now safely check if tags_value is not NA
+                        if pd.notna(tags_value):
+                            if isinstance(tags_value, list):
+                                user_game_tags.update(tags_value)
+                            elif isinstance(tags_value, str):
+                                user_game_tags.update(tag.strip() for tag in tags_value.split(','))
 
             # Boost scores for games with matching tags
             for similar_id in list(similar_game_scores.keys()):
@@ -1080,20 +1118,35 @@ def custom_recommendations():
                 if len(game_rows) > 0:
                     # Get tags safely from the first row
                     first_row = game_rows.iloc[0]
-                    if 'tags' in first_row and pd.notna(first_row['tags']):
-                        tags_value = first_row['tags']
-                        game_tags = []
-                        if isinstance(tags_value, list):
-                            game_tags = tags_value
-                        elif isinstance(tags_value, str):
-                            game_tags = [tag.strip() for tag in tags_value.split(',')]
 
-                        # Calculate tag overlap
-                        common_tags = user_game_tags.intersection(game_tags)
-                        if common_tags:
-                            # Add tag match bonus
-                            tag_bonus = 0.2 * len(common_tags)
-                            similar_game_scores[similar_id] += tag_bonus
+                    # FIX: Check if 'tags' column exists in the dataframe
+                    if 'tags' in game_rows.columns:
+                        # Get the tags value for this specific row
+                        tags_value = first_row['tags']
+
+                        # IMPROVED FIX: Extra safety check for pandas Series
+                        # If tags_value is a Series, get the first value with .iloc[0]
+                        if isinstance(tags_value, pd.Series):
+                            # Check if Series is not empty before accessing first element
+                            if len(tags_value) > 0 and pd.notna(tags_value.iloc[0]):
+                                tags_value = tags_value.iloc[0]
+                            else:
+                                continue  # Skip if Series is empty or has NA
+
+                        # Now safely check if tags_value is not NA
+                        if pd.notna(tags_value):
+                            game_tags = []
+                            if isinstance(tags_value, list):
+                                game_tags = tags_value
+                            elif isinstance(tags_value, str):
+                                game_tags = [tag.strip() for tag in tags_value.split(',')]
+
+                            # Calculate tag overlap
+                            common_tags = user_game_tags.intersection(game_tags)
+                            if common_tags:
+                                # Add tag match bonus
+                                tag_bonus = 0.2 * len(common_tags)
+                                similar_game_scores[similar_id] += tag_bonus
 
         # Sort recommendations by score
         sorted_recommendations = sorted(similar_game_scores.items(), key=lambda x: x[1], reverse=True)[:10]
@@ -1132,6 +1185,7 @@ def custom_recommendations():
             'status': 'error',
             'message': 'Failed to generate recommendations. Please try again later.'
         }), 500
+
 
 # Frontend application routes
 @app.route('/', defaults={'path': ''})

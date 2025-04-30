@@ -97,7 +97,7 @@ class RecommenderEvaluator:
                 try:
                     recommendations = model.recommend(user_id, max_k)
                     if not recommendations:
-                        logger.warning(f"No recommendations generated for user {user_id}")
+                        # logger.warning(f"No recommendations generated for user {user_id}")
                         continue
 
                     recommended_items = [item_id for item_id, _ in recommendations]

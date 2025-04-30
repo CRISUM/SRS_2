@@ -40,23 +40,17 @@ class SVDModel(BaseRecommenderModel):
         self.reverse_user_map = {}
         self.reverse_item_map = {}
         self.user_item_matrix = None
+        self.item_popularity = {}  # Add this line
 
     def fit(self, data):
-        """Train the model with provided data
-
-        Args:
-            data (DataFrame or dict): If DataFrame, must contain user_id, item_id, and rating columns
-                                     If dict, must contain 'user_item_matrix' key
-        Returns:
-            self: Trained model
-        """
+        """Train the model with provided data"""
         logger.info("Training SVD model...")
 
         if isinstance(data, pd.DataFrame):
             # Convert DataFrame to user-item matrix
             df_subset = data[['user_id', 'app_id']].copy()
 
-            # 优先使用 rating_new 列
+            # Determine rating column with better error handling
             if 'rating_new' in data.columns and pd.api.types.is_numeric_dtype(data['rating_new']):
                 df_subset['rating_value'] = data['rating_new']
                 rating_col = 'rating_value'
@@ -64,13 +58,16 @@ class SVDModel(BaseRecommenderModel):
                 df_subset['rating_value'] = data['rating']
                 rating_col = 'rating_value'
             elif 'is_recommended' in data.columns:
-                # Convert boolean to numeric
-                df_subset['rating_value'] = data['is_recommended'].astype(int) * 10
+                # Convert boolean to numeric (0-5 scale instead of 0-10)
+                df_subset['rating_value'] = data['is_recommended'].astype(int) * 5
                 rating_col = 'rating_value'
             else:
-                # Use hours as rating
+                # Use hours as rating with better normalization
                 rating_col = 'hours'
-                df_subset['rating_value'] = data['hours'].fillna(0)
+                # Normalized hours to 0-5 scale with log transformation to handle outliers
+                df_subset['rating_value'] = data['hours'].fillna(0).apply(
+                    lambda x: min(5, np.log1p(x))
+                )
                 rating_col = 'rating_value'
 
             # Create user-item matrix
@@ -82,6 +79,9 @@ class SVDModel(BaseRecommenderModel):
                 aggfunc='mean',
                 fill_value=0
             )
+
+            self._calculate_item_popularity(data)
+
         elif isinstance(data, dict) and 'user_item_matrix' in data:
             self.user_item_matrix = data['user_item_matrix']
         else:
@@ -96,28 +96,63 @@ class SVDModel(BaseRecommenderModel):
 
         # Perform matrix factorization using SVD
         matrix = self.user_item_matrix.values
-        self.global_mean = np.mean(matrix[matrix > 0]) if np.count_nonzero(matrix) > 0 else 0
 
-        # Center the matrix (subtract mean from non-zero entries)
+        # Only calculate mean of non-zero entries
+        non_zero_mask = matrix > 0
+        if np.any(non_zero_mask):
+            self.global_mean = matrix[non_zero_mask].mean()
+        else:
+            self.global_mean = 0
+
+        # Center the matrix with better handling of zeros
         centered_matrix = matrix.copy()
-        centered_matrix[centered_matrix > 0] -= self.global_mean
+        centered_matrix[non_zero_mask] -= self.global_mean
 
-        # Perform truncated SVD
-        u, sigma, vt = svds(centered_matrix, k=min(self.n_components, min(matrix.shape) - 1))
+        # Add small regularization term to improve stability
+        reg_factor = 0.01
 
-        # Sort the singular values in descending order
-        idx = np.argsort(sigma)[::-1]
-        sigma = sigma[idx]
-        u = u[:, idx]
-        vt = vt[idx, :]
+        # Check if matrix is valid for SVD
+        if centered_matrix.shape[0] < 2 or centered_matrix.shape[1] < 2:
+            logger.warning("Matrix too small for SVD, using identity matrices")
+            # Create dummy factors for extremely small matrices
+            self.user_factors = np.eye(matrix.shape[0])[:, :self.n_components]
+            self.item_factors = np.eye(self.n_components, matrix.shape[1])
+            return self
 
-        # Store the decomposition results
-        # User factors with sigma incorporated
-        self.user_factors = u @ np.diag(np.sqrt(sigma))
-        # Item factors with sigma incorporated
-        self.item_factors = np.diag(np.sqrt(sigma)) @ vt
+        # Get min component count, ensuring we don't exceed matrix dimensions
+        k = min(self.n_components, min(centered_matrix.shape) - 1)
 
-        logger.info(f"SVD model trained successfully with {self.n_components} factors")
+        try:
+            # Perform truncated SVD with error handling
+            u, sigma, vt = svds(centered_matrix, k=k)
+
+            # Sort the singular values in descending order
+            idx = np.argsort(sigma)[::-1]
+            sigma = sigma[idx]
+            u = u[:, idx]
+            vt = vt[idx, :]
+
+            # Store the decomposition results with regularization
+            self.user_factors = u @ np.diag(np.sqrt(sigma + reg_factor))
+            self.item_factors = np.diag(np.sqrt(sigma + reg_factor)) @ vt
+
+            logger.info(f"SVD model trained successfully with {k} factors")
+
+        except Exception as e:
+            logger.error(f"Error in SVD computation: {str(e)}")
+            logger.error("Falling back to simpler matrix factorization")
+
+            # Fallback to simpler SVD using sklearn
+            from sklearn.decomposition import TruncatedSVD
+
+            # Create and fit the SVD model
+            svd = TruncatedSVD(n_components=k, random_state=self.random_state)
+            svd_item_features = svd.fit_transform(centered_matrix.T)
+
+            # Extract the components
+            self.user_factors = svd.components_.T  # User factors
+            self.item_factors = svd_item_features.T  # Item factors
+
         return self
 
     def predict(self, user_id, item_id):
@@ -155,22 +190,14 @@ class SVDModel(BaseRecommenderModel):
         return prediction
 
     def recommend(self, user_id, n=10):
-        """Generate top-N recommendations for a user
-
-        Args:
-            user_id: User ID
-            n (int): Number of recommendations
-
-        Returns:
-            list: List of (item_id, score) tuples
-        """
+        """Generate top-N recommendations for a user"""
         if self.user_factors is None or self.item_factors is None:
             logger.warning("Model not trained yet")
             return []
 
         # Check if user exists in the model
         if user_id not in self.user_map:
-            logger.warning(f"User {user_id} not found in the model")
+            # logger.warning(f"User {user_id} not found in the model")
             return []
 
         user_idx = self.user_map[user_id]
@@ -185,16 +212,45 @@ class SVDModel(BaseRecommenderModel):
 
         # Calculate scores for all items
         scores = []
+
+        # Add some randomness for exploration (helps with sparse data)
+        exploration_factor = 0.05
+
         for item_id, item_idx in self.item_map.items():
             if item_id in existing_items:
                 continue
 
             item_factor = self.item_factors[:, item_idx]
-            score = self.global_mean + np.dot(user_factor, item_factor)
-            scores.append((item_id, max(0, min(10, score)) / 10))
+
+            # Calculate core prediction
+            base_score = self.global_mean + np.dot(user_factor, item_factor)
+
+            # Add small random factor for exploration
+            random_boost = exploration_factor * np.random.random()
+
+            # Normalize to 0-1 scale with clipping
+            final_score = max(0, min(1, (base_score / 5) + random_boost))
+
+            scores.append((item_id, final_score))
 
         # Sort by score in descending order
         scores.sort(key=lambda x: x[1], reverse=True)
+
+        # If we have very few recommendations, add more diversity
+        if len(scores) < n * 2:
+            # Consider adding some items based on overall popularity
+            if hasattr(self, 'item_popularity'):
+                for item_id, pop in self.item_popularity.items():
+                    if item_id not in existing_items and item_id not in [s[0] for s in scores]:
+                        # Scale popularity to match prediction scores
+                        pop_score = 0.3 + (0.4 * pop)  # Between 0.3 and 0.7
+                        scores.append((item_id, pop_score))
+
+                        if len(scores) >= n * 3:
+                            break
+
+            # Re-sort with the additional items
+            scores.sort(key=lambda x: x[1], reverse=True)
 
         # Return top N
         return scores[:n]
@@ -368,3 +424,16 @@ class SVDModel(BaseRecommenderModel):
         except Exception as e:
             logger.error(f"Error loading SVD model: {str(e)}")
             return None
+
+    def _calculate_item_popularity(self, df):
+        """Calculate popularity scores for items"""
+        if 'app_id' not in df.columns:
+            return
+
+        # Get count of users per item
+        item_counts = df.groupby('app_id')['user_id'].nunique()
+        total_users = df['user_id'].nunique()
+
+        # Calculate normalized popularity
+        for item_id, count in item_counts.items():
+            self.item_popularity[item_id] = count / total_users
