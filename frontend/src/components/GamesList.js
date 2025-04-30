@@ -1,10 +1,10 @@
-// frontend/src/components/GamesList.js
+// frontend/src/components/GamesList.js - Fixed API calls
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { toast } from 'react-toastify';
 import GameCard from './GameCard';
 
-const GamesList = ({ userPreferences, updatePreference }) => {
+const GamesList = () => {
   const [games, setGames] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -18,10 +18,22 @@ const GamesList = ({ userPreferences, updatePreference }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [searchTimeout, setSearchTimeout] = useState(null);
 
+  // User actions state - Load from localStorage
+  const [userActions, setUserActions] = useState(() => {
+    const savedActions = localStorage.getItem('userGameActions');
+    return savedActions ? JSON.parse(savedActions) : {
+      liked: [],
+      purchased: [],
+      recommended: []
+    };
+  });
+
+  // Load games on initial render and when page or limit changes
   useEffect(() => {
     fetchGames(currentPage, limit, searchTerm);
   }, [currentPage, limit]);
 
+  // Debounce search input
   useEffect(() => {
     if (searchTimeout) {
       clearTimeout(searchTimeout);
@@ -34,16 +46,20 @@ const GamesList = ({ userPreferences, updatePreference }) => {
 
     setSearchTimeout(timeout);
 
-    // 这里缺少了这个右大括号来闭合useEffect
-    return () => clearTimeout(timeout); // 添加清理函数
-  }, [searchTerm, limit]); // 添加依赖项
+    return () => clearTimeout(timeout);
+  }, [searchTerm, limit]);
+
+  // Save user actions to localStorage when they change
+  useEffect(() => {
+    localStorage.setItem('userGameActions', JSON.stringify(userActions));
+  }, [userActions]);
 
   const fetchGames = async (page, pageLimit, search) => {
     setLoading(true);
     setError(null);
 
     try {
-      const response = await axios.get('/games', {
+      const response = await axios.get('/api/games', {
         params: { page, limit: pageLimit, search }
       });
 
@@ -67,6 +83,58 @@ const GamesList = ({ userPreferences, updatePreference }) => {
 
   const handleSearchChange = (e) => {
     setSearchTerm(e.target.value);
+  };
+
+  const handleGameAction = (gameId, actionType) => {
+    setUserActions(prev => {
+      // Create a copy of the action arrays
+      const newActions = { ...prev };
+      const gameIdNum = parseInt(gameId);
+
+      // Update the appropriate array based on action type
+      switch (actionType) {
+        case 'like':
+          if (!newActions.liked.includes(gameIdNum)) {
+            newActions.liked = [...newActions.liked, gameIdNum];
+          }
+          break;
+        case 'buy':
+          if (!newActions.purchased.includes(gameIdNum)) {
+            newActions.purchased = [...newActions.purchased, gameIdNum];
+          }
+          break;
+        case 'recommend':
+          if (!newActions.recommended.includes(gameIdNum)) {
+            newActions.recommended = [...newActions.recommended, gameIdNum];
+          }
+          break;
+        case 'unlike':
+          newActions.liked = newActions.liked.filter(id => id !== gameIdNum);
+          break;
+        case 'unbuy':
+          newActions.purchased = newActions.purchased.filter(id => id !== gameIdNum);
+          break;
+        case 'unrecommend':
+          newActions.recommended = newActions.recommended.filter(id => id !== gameIdNum);
+          break;
+        default:
+          break;
+      }
+
+      return newActions;
+    });
+
+    // Show notification of the action
+    const actionMessages = {
+      like: 'Game added to liked games',
+      buy: 'Game added to your library',
+      recommend: 'Game added to recommended games',
+      unlike: 'Game removed from liked games',
+      unbuy: 'Game removed from your library',
+      unrecommend: 'Game removed from recommended games'
+    };
+
+    toast.success(actionMessages[actionType] || 'Action recorded');
   };
 
   return (
@@ -102,8 +170,8 @@ const GamesList = ({ userPreferences, updatePreference }) => {
               <GameCard
                 key={game.id}
                 game={game}
-                userPreferences={userPreferences}
-                updatePreference={updatePreference}
+                onAction={handleGameAction}
+                userActions={userActions}
               />
             ))}
           </div>

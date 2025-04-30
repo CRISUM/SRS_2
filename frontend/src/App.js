@@ -1,36 +1,36 @@
-// src/App.js
+// src/App.js - Updated API Configuration
 import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
 import axios from 'axios';
 import { ToastContainer, toast } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
 
-// 组件导入
+// Components import
 import Header from './components/Header';
 import Home from './components/Home';
 import GameDetails from './components/GameDetails';
 import GamesList from './components/GamesList';
 import Footer from './components/Footer';
 
-// API 基础URL
-const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
+// API base URL - FIXED to remove the duplicate /api
+const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000';
 
-// Axios 配置
+// Axios configuration
 axios.defaults.baseURL = API_BASE_URL;
 
 function App() {
   const [popularGames, setPopularGames] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  // 初始化 - 加载热门游戏
+  // Initialize - load popular games
   useEffect(() => {
     fetchPopularGames();
   }, []);
 
-  // 获取流行游戏
+  // Fetch popular games
   const fetchPopularGames = async () => {
     try {
-      const response = await axios.get('/popular-games?count=10');
+      const response = await axios.get('/api/popular-games?count=10');
       setPopularGames(response.data.popular_games || []);
     } catch (error) {
       console.error('Error fetching popular games:', error);

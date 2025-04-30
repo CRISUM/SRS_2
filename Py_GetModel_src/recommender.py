@@ -546,6 +546,14 @@ class SteamRecommender:
                 logger.warning("No evaluation results available for visualization")
                 return False
 
+            # Ensure visualization directory exists
+            os.makedirs(self.visualizer.output_dir, exist_ok=True)
+
+            # Use visualizer to create visualizations
+            visualization_results = self.visualizer.visualize_metrics(self.evaluation_results)
+            if not visualization_results:
+                logger.warning("Failed to create metrics visualizations")
+
             # Use visualizer to create visualizations
             self.visualizer.visualize_metrics(self.evaluation_results)
 

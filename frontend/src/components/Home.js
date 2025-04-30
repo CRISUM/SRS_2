@@ -1,4 +1,4 @@
-// frontend/src/components/Home.js
+// frontend/src/components/Home.js - Fixed API calls
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import axios from 'axios';
@@ -12,7 +12,7 @@ const Home = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [userActions, setUserActions] = useState(() => {
-    // 从本地存储加载用户操作
+    // Load user actions from local storage
     const savedActions = localStorage.getItem('userGameActions');
     return savedActions ? JSON.parse(savedActions) : {
       liked: [],
@@ -22,12 +22,12 @@ const Home = () => {
   });
   const [showRecommendations, setShowRecommendations] = useState(false);
 
-  // 加载随机游戏
+  // Load random games
   useEffect(() => {
     fetchRandomGames();
   }, []);
 
-  // 保存用户操作到本地存储
+  // Save user actions to local storage
   useEffect(() => {
     localStorage.setItem('userGameActions', JSON.stringify(userActions));
   }, [userActions]);
@@ -35,7 +35,7 @@ const Home = () => {
   const fetchRandomGames = async () => {
     setLoading(true);
     try {
-      // 从游戏列表API获取更多游戏以创建随机选择
+      // Fetch games from the games API - FIXED path
       const response = await axios.get('/api/games?limit=20');
       setRandomGames(response.data.games || []);
     } catch (error) {
@@ -51,7 +51,7 @@ const Home = () => {
       setSearchResults([]);
       return;
     }
-    
+
     try {
       const response = await axios.get(`/api/games?search=${encodeURIComponent(searchTerm)}`);
       setSearchResults(response.data.games || []);
@@ -63,43 +63,44 @@ const Home = () => {
 
   const handleGameAction = (gameId, actionType) => {
     setUserActions(prev => {
-      // 创建操作数组的副本
+      // Create a copy of the action arrays
       const newActions = { ...prev };
-      
-      // 根据操作类型更新相应数组
+      const gameIdNum = parseInt(gameId);
+
+      // Update the appropriate array based on action type
       switch (actionType) {
         case 'like':
-          if (!newActions.liked.includes(gameId)) {
-            newActions.liked = [...newActions.liked, gameId];
+          if (!newActions.liked.includes(gameIdNum)) {
+            newActions.liked = [...newActions.liked, gameIdNum];
           }
           break;
         case 'buy':
-          if (!newActions.purchased.includes(gameId)) {
-            newActions.purchased = [...newActions.purchased, gameId];
+          if (!newActions.purchased.includes(gameIdNum)) {
+            newActions.purchased = [...newActions.purchased, gameIdNum];
           }
           break;
         case 'recommend':
-          if (!newActions.recommended.includes(gameId)) {
-            newActions.recommended = [...newActions.recommended, gameId];
+          if (!newActions.recommended.includes(gameIdNum)) {
+            newActions.recommended = [...newActions.recommended, gameIdNum];
           }
           break;
         case 'unlike':
-          newActions.liked = newActions.liked.filter(id => id !== gameId);
+          newActions.liked = newActions.liked.filter(id => id !== gameIdNum);
           break;
         case 'unbuy':
-          newActions.purchased = newActions.purchased.filter(id => id !== gameId);
+          newActions.purchased = newActions.purchased.filter(id => id !== gameIdNum);
           break;
         case 'unrecommend':
-          newActions.recommended = newActions.recommended.filter(id => id !== gameId);
+          newActions.recommended = newActions.recommended.filter(id => id !== gameIdNum);
           break;
         default:
           break;
       }
-      
+
       return newActions;
     });
-    
-    // 显示操作的通知
+
+    // Show notification of the action
     const actionMessages = {
       like: 'Game added to liked games',
       buy: 'Game added to your library',
@@ -108,19 +109,19 @@ const Home = () => {
       unbuy: 'Game removed from your library',
       unrecommend: 'Game removed from recommended games'
     };
-    
+
     toast.success(actionMessages[actionType] || 'Action recorded');
   };
 
   const getRecommendations = async () => {
     setLoading(true);
     try {
-      // 发送用户操作历史到后端以获取推荐
+      // Send user action history to backend for recommendations
       const response = await axios.post('/api/custom-recommendations', userActions);
       setRecommendations(response.data.recommendations || []);
       setShowRecommendations(true);
-      
-      // 显示成功消息
+
+      // Show success message
       toast.success('Recommendations generated based on your preferences!');
     } catch (error) {
       console.error('Error getting recommendations:', error);
@@ -131,7 +132,7 @@ const Home = () => {
   };
 
   const resetActions = () => {
-    // 清除所有用户操作
+    // Clear all user actions
     setUserActions({
       liked: [],
       purchased: [],
@@ -141,12 +142,12 @@ const Home = () => {
     toast.info('Your preferences have been reset');
   };
 
-  // 确定要显示的游戏列表
+  // Determine which games to display
   const displayGames = searchTerm ? searchResults : randomGames;
 
   return (
     <div className="home">
-      {/* 搜索栏 */}
+      {/* Search bar */}
       <div className="mb-6 flex gap-2">
         <input
           type="text"
@@ -156,7 +157,7 @@ const Home = () => {
           onChange={(e) => setSearchTerm(e.target.value)}
           onKeyPress={(e) => e.key === 'Enter' && handleSearch()}
         />
-        <button 
+        <button
           onClick={handleSearch}
           className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md"
         >
@@ -164,7 +165,7 @@ const Home = () => {
         </button>
       </div>
 
-      {/* 用户操作计数和操作按钮 */}
+      {/* User action counts and action buttons */}
       <div className="bg-white rounded-lg shadow-md p-4 mb-6">
         <div className="flex flex-wrap items-center justify-between">
           <div className="flex space-x-4 mb-2 md:mb-0">
@@ -178,7 +179,7 @@ const Home = () => {
               👍 {userActions.recommended.length} Recommended
             </span>
           </div>
-          
+
           <div className="flex space-x-2">
             <button
               onClick={getRecommendations}
@@ -187,7 +188,7 @@ const Home = () => {
             >
               {loading ? 'Loading...' : 'Get Recommendations'}
             </button>
-            
+
             <button
               onClick={resetActions}
               className="bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded-md"
@@ -198,7 +199,7 @@ const Home = () => {
         </div>
       </div>
 
-      {/* 推荐区域 */}
+      {/* Recommendations area */}
       {showRecommendations && recommendations.length > 0 && (
         <section className="mb-10">
           <h2 className="text-2xl font-bold mb-4">Your Personalized Recommendations</h2>
@@ -216,12 +217,12 @@ const Home = () => {
         </section>
       )}
 
-      {/* 游戏展示区域 */}
+      {/* Games display area */}
       <section>
         <h2 className="text-2xl font-bold mb-4">
           {searchTerm ? 'Search Results' : 'Discover Games'}
         </h2>
-        
+
         {loading && displayGames.length === 0 ? (
           <div className="flex justify-center items-center h-64">
             <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-600"></div>

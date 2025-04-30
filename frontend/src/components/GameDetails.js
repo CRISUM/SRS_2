@@ -1,10 +1,9 @@
-// frontend/src/components/GameDetails.js
+// frontend/src/components/GameDetails.js - Fixed API calls
 import React, { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import axios from 'axios';
 import { toast } from 'react-toastify';
 import GameCard from './GameCard';
-import Register from "./Register";
 
 const GameDetails = () => {
   const { gameId } = useParams();
@@ -12,7 +11,7 @@ const GameDetails = () => {
   const [similarGames, setSimilarGames] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  // 从本地存储加载用户操作
+  // Load user actions from localStorage
   const [userActions, setUserActions] = useState(() => {
     const savedActions = localStorage.getItem('userGameActions');
     return savedActions ? JSON.parse(savedActions) : {
@@ -22,7 +21,7 @@ const GameDetails = () => {
     };
   });
 
-  // 检查游戏在用户各操作列表中的状态
+  // Check if game is in user's actions
   const isLiked = userActions?.liked?.includes(parseInt(gameId));
   const isPurchased = userActions?.purchased?.includes(parseInt(gameId));
   const isRecommended = userActions?.recommended?.includes(parseInt(gameId));
@@ -32,9 +31,10 @@ const GameDetails = () => {
       setLoading(true);
 
       try {
+        // Fetch game details and similar games in parallel
         const [gameResponse, similarGamesResponse] = await Promise.all([
-          axios.get(`/games/${gameId}`),
-          axios.get(`/similar-games/${gameId}?count=4`)
+          axios.get(`/api/games/${gameId}`),
+          axios.get(`/api/similar-games/${gameId}?count=4`)
         ]);
 
         setGame(gameResponse.data.game);
@@ -50,18 +50,18 @@ const GameDetails = () => {
     fetchGameData();
   }, [gameId]);
 
-  // 保存用户操作到本地存储
+  // Save user actions to localStorage when they change
   useEffect(() => {
     localStorage.setItem('userGameActions', JSON.stringify(userActions));
   }, [userActions]);
 
   const handleGameAction = (gameId, actionType) => {
     setUserActions(prev => {
-      // 创建操作数组的副本
+      // Create a copy of the action arrays
       const newActions = { ...prev };
       const gameIdNum = parseInt(gameId);
 
-      // 根据操作类型更新相应数组
+      // Update the appropriate array based on action type
       switch (actionType) {
         case 'like':
           if (!newActions.liked.includes(gameIdNum)) {
@@ -94,7 +94,7 @@ const GameDetails = () => {
       return newActions;
     });
 
-    // 显示操作的通知
+    // Show action notification
     const actionMessages = {
       like: 'Game added to liked games',
       buy: 'Game added to your library',
@@ -209,9 +209,9 @@ const GameDetails = () => {
 
           {/* Game metadata */}
           <div className="mt-6 text-gray-600">
-            {game.release_date && (
+            {game.date_release && (
               <p className="mb-2">
-                <strong>Release Date:</strong> {new Date(game.release_date).toLocaleDateString()}
+                <strong>Release Date:</strong> {new Date(game.date_release).toLocaleDateString()}
               </p>
             )}
 
@@ -225,6 +225,14 @@ const GameDetails = () => {
               <p className="mb-2">
                 <strong>Positive Ratio:</strong> {(game.positive_ratio * 100).toFixed(0)}%
               </p>
+            )}
+
+            {/* Description */}
+            {game.description && (
+              <div className="mt-4 mb-6">
+                <h3 className="text-lg font-semibold mb-2">About</h3>
+                <p className="text-gray-700">{game.description}</p>
+              </div>
             )}
 
             {/* Platform compatibility */}
@@ -254,13 +262,14 @@ const GameDetails = () => {
                 game={similarGame}
                 onAction={handleGameAction}
                 userActions={userActions}
+                showScore={true}
               />
             ))}
           </div>
         </div>
       )}
     </div>
-  )
+  );
 };
 
 export default GameDetails;
