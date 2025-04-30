@@ -5,8 +5,7 @@
 app.py - Improved Flask API for Steam Game Recommender using CSV data
 Enhanced with better error handling and fallback sample data
 """
-
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, current_app, Response
 from flask_cors import CORS
 import os
 import json
@@ -18,7 +17,36 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
 import uuid
 import traceback
+from functools import lru_cache
 from sample_data import generate_sample_games, generate_sample_recommendations, generate_sample_users
+
+# Custom JSON encoder class that handles NumPy types
+class NumpyJSONEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super(NumpyJSONEncoder, self).default(obj)
+
+# Create a custom jsonify function that uses our encoder
+def custom_jsonify(*args, **kwargs):
+    """Custom jsonify function that handles NumPy types"""
+    if args and kwargs:
+        raise TypeError('jsonify() behavior undefined when passed both args and kwargs')
+    elif len(args) == 1:  # single args are passed directly to dumps()
+        data = args[0]
+    else:
+        data = args or kwargs
+
+    # Use the NumpyJSONEncoder for serialization
+    response = Response(
+        json.dumps(data, cls=NumpyJSONEncoder) + '\n',
+        mimetype='application/json'
+    )
+    return response
 
 # Set up logging
 logging.basicConfig(
@@ -51,6 +79,7 @@ games_df = None
 games_metadata = {}
 recommendations_df = None
 users_df = None
+game_info_cache = {}
 
 # User data (would use a database in a real application)
 users_db = {
@@ -71,6 +100,128 @@ DEFAULT_USER_PREFERENCES = {
         "played_games": []
     }
 }
+
+def get_game_info(game_id):
+    """Get game information with caching for better performance"""
+    # Try to convert to int for consistent lookup
+    try:
+        game_id = int(game_id)
+    except ValueError:
+        return None
+
+    # Check cache first
+    if game_id in game_info_cache:
+        return game_info_cache[game_id]
+
+    # Not in cache, need to look up
+    game_info = None
+
+    # Try to find in DataFrame
+    if games_df is not None:
+        # Use boolean indexing to find the game
+        game_data = games_df[games_df['app_id'] == game_id]
+
+        if len(game_data) > 0:
+            first_row = game_data.iloc[0]
+            game_info = {
+                'id': int(game_id),
+                'title': first_row['title'] if 'title' in first_row and pd.notna(
+                    first_row['title']) else f"Game {game_id}"
+            }
+
+            # Add tags (handle different possible formats safely)
+            game_tags = []
+            if 'tags' in game_data.columns:
+                # Get the first row's tags value
+                tags_value = first_row['tags']
+
+                # Check if it's not NA (avoiding the array truth value error)
+                if isinstance(tags_value, list) or (isinstance(tags_value, (str, float, int)) and pd.notna(tags_value)):
+                    # Handle different tag formats
+                    if isinstance(tags_value, list):
+                        game_tags = tags_value
+                    elif isinstance(tags_value, str):
+                        game_tags = [tag.strip() for tag in tags_value.split(',')]
+
+            # If no tags found in DataFrame, try from metadata
+            if not game_tags and game_id in games_metadata and 'tags' in games_metadata[game_id]:
+                metadata_tags = games_metadata[game_id]['tags']
+                if isinstance(metadata_tags, list):
+                    game_tags = metadata_tags
+                elif isinstance(metadata_tags, str):
+                    game_tags = [tag.strip() for tag in metadata_tags.split(',')]
+
+            # Assign the tags to game_info
+            game_info['tags'] = game_tags
+
+            # Add description
+            if 'description' in game_data.columns and pd.notna(first_row['description']):
+                game_info['description'] = first_row['description']
+            elif game_id in games_metadata and 'description' in games_metadata[game_id]:
+                game_info['description'] = games_metadata[game_id]['description']
+            else:
+                game_info['description'] = ""  # Default empty description
+
+            # Add other available info from DataFrame - non-boolean columns
+            for col in ['date_release', 'rating', 'positive_ratio', 'price_final', 'price_original']:
+                if col in game_data.columns and pd.notna(first_row[col]):
+                    game_info[col] = first_row[col]
+
+            # Handle boolean columns separately
+            for bool_col in ['win', 'mac', 'linux']:
+                if bool_col in game_data.columns and pd.notna(first_row[bool_col]):
+                    # Convert Python boolean to JSON-compatible boolean
+                    bool_value = first_row[bool_col]
+                    # Convert to a proper boolean if it's a string representation
+                    if isinstance(bool_value, str):
+                        bool_value = bool_value.lower() == 'true'
+                    # Now store it as a Python bool which Flask can properly serialize
+                    game_info[bool_col] = bool(bool_value)
+
+    # If not found in DataFrame, try metadata
+    if game_info is None and game_id in games_metadata:
+        metadata = games_metadata[game_id]
+        game_info = {
+            'id': int(game_id),
+            'title': metadata.get('title', f'Game {game_id}'),
+            'tags': metadata.get('tags', []),
+            'description': metadata.get('description', '')
+        }
+
+        # Add other available info - handling non-boolean columns
+        for key in ['date_release', 'rating', 'positive_ratio', 'price_final', 'price_original']:
+            if key in metadata:
+                game_info[key] = metadata[key]
+
+        # Handle boolean columns separately
+        for bool_col in ['win', 'mac', 'linux']:
+            if bool_col in metadata:
+                bool_value = metadata[bool_col]
+                # Convert string representations to proper booleans
+                if isinstance(bool_value, str):
+                    bool_value = bool_value.lower() == 'true'
+                # Store as a Python bool which Flask can properly serialize
+                game_info[bool_col] = bool(bool_value)
+
+    # Cache the result (even if None)
+    if game_info is not None:
+        game_info_cache[game_id] = game_info
+
+    return game_info
+
+def convert_numpy_types(obj):
+    """Convert numpy types to native Python types recursively."""
+    if isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {k: convert_numpy_types(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [convert_numpy_types(i) for i in obj]
+    return obj
 
 
 def load_data():
@@ -351,50 +502,113 @@ def get_game_info(game_id):
     # Game not found
     return None
 
+
 def get_popular_games(n=10):
-    """Get popular games"""
+    """Get popular games - FIXED optimized version with caching"""
+    # Use a simple in-memory cache to avoid recalculating popular games
+
+    # Check if we have a cached result that's less than 1 hour old
+    current_time = time.time()
+    if hasattr(get_popular_games, '_cache') and hasattr(get_popular_games, '_cache_time'):
+        if current_time - get_popular_games._cache_time < 3600:  # 1 hour cache validity
+            # Return cached results if available for requested size
+            if len(get_popular_games._cache) >= n:
+                return get_popular_games._cache[:n]
+
+    # If no valid cache, calculate popular games
     if recommendations_df is not None and len(recommendations_df) > 0:
-        # Calculate game counts
-        game_counts = recommendations_df['app_id'].value_counts()
+        # For large datasets, use a more efficient approach
+        if len(recommendations_df) > 100000:
+            # Take a random sample of 100,000 recommendations for faster processing
+            sample_size = min(100000, len(recommendations_df))
+            sample_df = recommendations_df.sample(n=sample_size, random_state=42)
 
-        # Calculate positive rating ratio
-        game_ratings = {}
-        for game_id in game_counts.index:
-            game_data = recommendations_df[recommendations_df['app_id'] == game_id]
-            if 'is_recommended' in game_data.columns:
-                pos_ratio = game_data['is_recommended'].mean()
-                game_ratings[game_id] = pos_ratio
-            else:
-                game_ratings[game_id] = 0.5  # Default if no ratings available
+            # Calculate game counts from the sample
+            game_counts = sample_df['app_id'].value_counts()
 
-        # Calculate combined score: 70% popularity + 30% ratings
-        popular_items = []
-        total_reviews = len(recommendations_df)
-        for game_id, count in game_counts.items():
-            pop_score = count / total_reviews
-            rating_score = game_ratings.get(game_id, 0.5)
-            final_score = (pop_score * 0.7) + (rating_score * 0.3)
-            popular_items.append((game_id, final_score))
+            # Calculate positive rating ratio from the sample
+            game_ratings = {}
+            # Get the top 100 games by count
+            top_games = game_counts.head(100).index.tolist()
 
-        # Sort and return top N
+            for game_id in top_games:
+                game_data = sample_df[sample_df['app_id'] == game_id]
+                if 'is_recommended' in game_data.columns:
+                    pos_ratio = game_data['is_recommended'].mean()
+                    game_ratings[game_id] = pos_ratio
+                else:
+                    game_ratings[game_id] = 0.5  # Default if no ratings available
+
+            # Calculate combined score: 70% popularity + 30% ratings
+            popular_items = []
+            total_reviews = sample_size
+
+            for game_id in top_games:
+                count = game_counts[game_id]
+                pop_score = count / total_reviews
+                rating_score = game_ratings.get(game_id, 0.5)
+                final_score = (pop_score * 0.7) + (rating_score * 0.3)
+                popular_items.append((game_id, final_score))
+        else:
+            # Original approach for smaller datasets
+            game_counts = recommendations_df['app_id'].value_counts()
+
+            # Get the top 100 games by count
+            top_games = game_counts.head(100).index.tolist()
+
+            # Calculate positive rating ratio
+            game_ratings = {}
+            for game_id in top_games:
+                game_data = recommendations_df[recommendations_df['app_id'] == game_id]
+                if 'is_recommended' in game_data.columns:
+                    pos_ratio = game_data['is_recommended'].mean()
+                    game_ratings[game_id] = pos_ratio
+                else:
+                    game_ratings[game_id] = 0.5
+
+            # Calculate combined score
+            popular_items = []
+            total_reviews = len(recommendations_df)
+
+            for game_id in top_games:
+                count = game_counts[game_id]
+                pop_score = count / total_reviews
+                rating_score = game_ratings.get(game_id, 0.5)
+                final_score = (pop_score * 0.7) + (rating_score * 0.3)
+                popular_items.append((game_id, final_score))
+
+        # Sort and get top N
         popular_items.sort(key=lambda x: x[1], reverse=True)
-        return popular_items[:n]
+        result = popular_items[:100]  # Cache more than requested for future calls
 
-    # If no recommendation data, use games sorted by rating
+    # Fallback to games sorted by rating if no recommendation data
     elif games_df is not None and len(games_df) > 0:
         if 'rating' in games_df.columns:
-            # Sort by rating if available
-            top_games = games_df.sort_values('rating', ascending=False).head(n)
+            # Handle the case where rating column is not numeric
+            try:
+                # First attempt to convert the rating column to numeric if possible
+                games_df['rating_numeric'] = pd.to_numeric(games_df['rating'], errors='coerce')
+                # Sort by the converted column
+                top_games_df = games_df.sort_values('rating_numeric', ascending=False).head(100)
+            except:
+                # If conversion fails, just take the first 100 games
+                top_games_df = games_df.head(100)
         else:
             # Just take the first N games
-            top_games = games_df.head(n)
+            top_games_df = games_df.head(100)
 
         # Calculate normalized scores between 0.5 and 1.0
-        max_idx = len(top_games)
-        return [(row['app_id'], 1.0 - (0.5 * idx / max_idx)) for idx, (_, row) in enumerate(top_games.iterrows())]
+        max_idx = len(top_games_df)
+        result = [(row['app_id'], 1.0 - (0.5 * idx / max_idx)) for idx, (_, row) in enumerate(top_games_df.iterrows())]
+    else:
+        # Fallback: empty list
+        result = []
 
-    # Fallback: empty list
-    return []
+    # Update cache
+    get_popular_games._cache = result
+    get_popular_games._cache_time = current_time
+
+    return result[:n]
 
 
 def get_similar_games(game_id, n=5):
@@ -638,9 +852,9 @@ def generate_recommendations(user_id, n=10):
 def health_check():
     """Health check API"""
     if games_df is not None:
-        return jsonify({'status': 'ok', 'message': 'API service is running'})
+        return custom_jsonify({'status': 'ok', 'message': 'API service is running'})
     else:
-        return jsonify({'status': 'error', 'message': 'Data not loaded'}), 500
+        return custom_jsonify({'status': 'error', 'message': 'Data not loaded'}), 500
 
 
 @app.route('/api/register', methods=['POST'])
@@ -651,10 +865,10 @@ def register():
     password = data.get('password')
 
     if not username or not password:
-        return jsonify({'status': 'error', 'message': 'Username and password are required'}), 400
+        return custom_jsonify({'status': 'error', 'message': 'Username and password are required'}), 400
 
     if username in users_db:
-        return jsonify({'status': 'error', 'message': 'Username already exists'}), 409
+        return custom_jsonify({'status': 'error', 'message': 'Username already exists'}), 409
 
     # Generate user ID and store user info
     user_id = str(uuid.uuid4())
@@ -674,7 +888,7 @@ def register():
     # Generate token
     access_token = create_access_token(identity=user_id)
 
-    return jsonify({
+    return custom_jsonify({
         'status': 'success',
         'message': 'User registered successfully',
         'token': access_token,
@@ -693,13 +907,13 @@ def login():
     password = data.get('password')
 
     if not username or not password:
-        return jsonify({'status': 'error', 'message': 'Username and password are required'}), 400
+        return custom_jsonify({'status': 'error', 'message': 'Username and password are required'}), 400
 
     # Auto-login for demo user
     if username == "demo" and password == "password":
         user = users_db["demo"]
         access_token = create_access_token(identity=user['id'])
-        return jsonify({
+        return custom_jsonify({
             'status': 'success',
             'message': 'Login successful',
             'token': access_token,
@@ -711,12 +925,12 @@ def login():
 
     user = users_db.get(username)
     if not user or not check_password_hash(user['password_hash'], password):
-        return jsonify({'status': 'error', 'message': 'Invalid credentials'}), 401
+        return custom_jsonify({'status': 'error', 'message': 'Invalid credentials'}), 401
 
     # Generate token
     access_token = create_access_token(identity=user['id'])
 
-    return jsonify({
+    return custom_jsonify({
         'status': 'success',
         'message': 'Login successful',
         'token': access_token,
@@ -738,7 +952,7 @@ def get_recommendations():
         cached_results = recommendation_cache[user_id]
         # Use cache if less than 1 hour old
         if time.time() - cached_results['timestamp'] < 3600:
-            return jsonify({
+            return custom_jsonify({
                 'status': 'success',
                 'recommendations': cached_results['recommendations'],
                 'cached': True
@@ -763,7 +977,7 @@ def get_recommendations():
             'timestamp': time.time()
         }
 
-        return jsonify({
+        return custom_jsonify({
             'status': 'success',
             'recommendations': recommendation_list,
             'cached': False
@@ -772,7 +986,7 @@ def get_recommendations():
     except Exception as e:
         logger.error(f"Error generating recommendations: {str(e)}")
         logger.error(traceback.format_exc())
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return custom_jsonify({'status': 'error', 'message': str(e)}), 500
 
 
 @app.route('/api/games/<int:game_id>', methods=['GET'])
@@ -781,13 +995,13 @@ def get_game(game_id):
     try:
         game_info = get_game_info(game_id)
         if game_info:
-            return jsonify({'status': 'success', 'game': game_info})
+            return custom_jsonify({'status': 'success', 'game': game_info})
         else:
-            return jsonify({'status': 'error', 'message': 'Game not found'}), 404
+            return custom_jsonify({'status': 'error', 'message': 'Game not found'}), 404
     except Exception as e:
         logger.error(f"Error getting game info: {str(e)}")
         logger.error(traceback.format_exc())
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return custom_jsonify({'status': 'error', 'message': str(e)}), 500
 
 
 @app.route('/api/games', methods=['GET'])
@@ -798,7 +1012,7 @@ def get_games():
         if games_df is None or len(games_df) == 0:
             logger.warning("No games data available, attempting to reload")
             if not load_data():
-                return jsonify({'status': 'error', 'message': 'Game data not available'}), 500
+                return custom_jsonify({'status': 'error', 'message': 'Game data not available'}), 500
 
         # Pagination parameters
         page = int(request.args.get('page', 1))
@@ -841,7 +1055,8 @@ def get_games():
             if game_info:
                 games_list.append(game_info)
 
-        return jsonify({
+        # Use convert_numpy_types before jsonify
+        response_data = convert_numpy_types({
             'status': 'success',
             'games': games_list,
             'pagination': {
@@ -852,10 +1067,12 @@ def get_games():
             }
         })
 
+        return custom_jsonify(response_data)
+
     except Exception as e:
         logger.error(f"Error getting games: {str(e)}")
         logger.error(traceback.format_exc())
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return custom_jsonify({'status': 'error', 'message': str(e)}), 500
 
 
 @app.route('/api/user/preferences', methods=['GET'])
@@ -879,7 +1096,7 @@ def get_user_preferences():
         'played_games': [get_game_info(game_id) for game_id in prefs.get('played_games', []) if get_game_info(game_id)]
     }
 
-    return jsonify({
+    return custom_jsonify({
         'status': 'success',
         'preferences': prefs_with_details
     })
@@ -904,12 +1121,12 @@ def update_user_preferences():
     game_id = data.get('game_id')
 
     if not action or not game_id:
-        return jsonify({'status': 'error', 'message': 'Action and game_id are required'}), 400
+        return custom_jsonify({'status': 'error', 'message': 'Action and game_id are required'}), 400
 
     try:
         game_id = int(game_id)
     except ValueError:
-        return jsonify({'status': 'error', 'message': 'Invalid game_id'}), 400
+        return custom_jsonify({'status': 'error', 'message': 'Invalid game_id'}), 400
 
     # Update based on action
     if action == 'like':
@@ -939,7 +1156,7 @@ def update_user_preferences():
             prefs['disliked_games'].remove(game_id)
 
     else:
-        return jsonify({'status': 'error', 'message': 'Invalid action'}), 400
+        return custom_jsonify({'status': 'error', 'message': 'Invalid action'}), 400
 
     # Update user preferences
     user_preferences[user_id] = prefs
@@ -948,7 +1165,7 @@ def update_user_preferences():
     if user_id in recommendation_cache:
         del recommendation_cache[user_id]
 
-    return jsonify({
+    return custom_jsonify({
         'status': 'success',
         'message': 'Preferences updated',
         'preferences': prefs
@@ -973,7 +1190,7 @@ def get_similar_games_api(game_id):
                 game_info['similarity'] = float(similarity)
                 similar_list.append(game_info)
 
-        return jsonify({
+        return custom_jsonify({
             'status': 'success',
             'similar_games': similar_list
         })
@@ -981,7 +1198,7 @@ def get_similar_games_api(game_id):
     except Exception as e:
         logger.error(f"Error getting similar games: {str(e)}")
         logger.error(traceback.format_exc())
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return custom_jsonify({'status': 'error', 'message': str(e)}), 500
 
 
 @app.route('/api/popular-games', methods=['GET'])
@@ -1002,7 +1219,7 @@ def get_popular_games_api():
                 game_info['popularity'] = float(popularity)
                 popular_list.append(game_info)
 
-        return jsonify({
+        return custom_jsonify({
             'status': 'success',
             'popular_games': popular_list
         })
@@ -1010,12 +1227,12 @@ def get_popular_games_api():
     except Exception as e:
         logger.error(f"Error getting popular games: {str(e)}")
         logger.error(traceback.format_exc())
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return custom_jsonify({'status': 'error', 'message': str(e)}), 500
 
 
 @app.route('/api/custom-recommendations', methods=['POST'])
 def custom_recommendations():
-    """Generate custom recommendations based on user actions API with improved error handling"""
+    """Generate custom recommendations based on user actions - FIXED version"""
     try:
         # Get user actions
         user_actions = request.get_json()
@@ -1034,6 +1251,7 @@ def custom_recommendations():
 
         # If no user actions, return popular games
         if not all_action_game_ids:
+            # Use the existing popular games function but limit to 10
             popular_games = get_popular_games(10)
             popular_list = []
             for game_id, popularity in popular_games:
@@ -1042,15 +1260,47 @@ def custom_recommendations():
                     game_info['score'] = float(popularity)
                     popular_list.append(game_info)
 
-            return jsonify({
+            return custom_jsonify({
                 'status': 'success',
                 'recommendations': popular_list,
                 'is_popular': True
             })
 
-        # Find games similar to those the user has interacted with
+        # ---- OPTIMIZATION: Limit the number of games to process ----
+        # Instead of processing the entire games_df, just process a reasonable subset
+        MAX_GAMES_TO_PROCESS = 2000
+
+        # Approach 1: If we're dealing with metadata, limit the games to consider
+        games_to_process = set()
+
+        # First, add direct neighbors from games_metadata as highest priority
+        for action_game_id in all_action_game_ids:
+            # Add similar games from metadata first
+            if action_game_id in games_metadata and 'tags' in games_metadata[action_game_id]:
+                action_game_tags = set(games_metadata[action_game_id]['tags']) if isinstance(
+                    games_metadata[action_game_id]['tags'], list) else set()
+
+                # Find games with at least one matching tag (limited)
+                tag_matches = 0
+                for other_id, metadata in games_metadata.items():
+                    if tag_matches >= 100:  # Limit to 100 per action game
+                        break
+                    if other_id not in all_action_game_ids and 'tags' in metadata:
+                        other_tags = set(metadata['tags']) if isinstance(metadata['tags'], list) else set()
+                        if action_game_tags.intersection(other_tags):
+                            games_to_process.add(other_id)
+                            tag_matches += 1
+
+        # If we still need more games, add popular ones
+        if len(games_to_process) < MAX_GAMES_TO_PROCESS:
+            # Get popular games
+            popular_games = get_popular_games(MAX_GAMES_TO_PROCESS - len(games_to_process))
+            # Extract just the game IDs from the popular games
+            for game_id, _ in popular_games:
+                games_to_process.add(game_id)
+
+        # ---- Build a more efficient similarity calculation ----
         similar_game_scores = {}  # game_id -> cumulative similarity score
-        games_excluded = set(all_action_game_ids)  # Exclude games the user has already interacted with
 
         # Action type weights
         action_weights = {
@@ -1059,7 +1309,8 @@ def custom_recommendations():
             'recommended': 2.5  # High weight for recommended games
         }
 
-        # Get similar games for each action type
+        # Collect all tags from user's action games for faster processing
+        user_action_tags = {}
         for action_type, game_ids in user_actions.items():
             if action_type not in action_weights or not game_ids:
                 continue
@@ -1067,89 +1318,49 @@ def custom_recommendations():
             weight = action_weights[action_type]
 
             for game_id in game_ids:
-                # Get similar games
-                similar_games = get_similar_games(game_id, 5)
+                # Get game tags
+                game_tags = []
 
-                # Add weighted similarity scores
-                for similar_id, similarity in similar_games:
-                    if similar_id not in games_excluded:
-                        # Apply action weight to similarity
-                        weighted_similarity = similarity * weight
-                        if similar_id in similar_game_scores:
-                            similar_game_scores[similar_id] += weighted_similarity
-                        else:
-                            similar_game_scores[similar_id] = weighted_similarity
+                # Try from games_metadata
+                if game_id in games_metadata and 'tags' in games_metadata[game_id]:
+                    tags_value = games_metadata[game_id]['tags']
+                    if isinstance(tags_value, list):
+                        game_tags = tags_value
+                    elif isinstance(tags_value, str):
+                        game_tags = [tag.strip() for tag in tags_value.split(',')]
 
-        # Add tag-based diversity enhancement
-        if games_df is not None and 'tags' in games_df.columns:
-            # Extract tags from user's interacted games
-            user_game_tags = set()
-            for game_id in all_action_game_ids:
-                # Find the game in the dataframe
-                game_rows = games_df[games_df['app_id'] == game_id]
-                if len(game_rows) > 0:
-                    # Get tags safely from the first row
-                    first_row = game_rows.iloc[0]
+                # Count tag occurrences with weight
+                for tag in game_tags:
+                    user_action_tags[tag] = user_action_tags.get(tag, 0) + weight
 
-                    # FIX: Check if 'tags' column exists in the dataframe
-                    if 'tags' in game_rows.columns:
-                        # Get the tags value for this specific row
-                        tags_value = first_row['tags']
+        # Fast similarity calculation using collected tags
+        for game_id in games_to_process:
+            if game_id in all_action_game_ids:
+                continue  # Skip games user already interacted with
 
-                        # IMPROVED FIX: Extra safety check for pandas Series
-                        # If tags_value is a Series, get the first value with .iloc[0]
-                        if isinstance(tags_value, pd.Series):
-                            # Check if Series is not empty before accessing first element
-                            if len(tags_value) > 0 and pd.notna(tags_value.iloc[0]):
-                                tags_value = tags_value.iloc[0]
-                            else:
-                                continue  # Skip if Series is empty or has NA
+            # Get game tags
+            game_tags = []
 
-                        # Now safely check if tags_value is not NA
-                        if pd.notna(tags_value):
-                            if isinstance(tags_value, list):
-                                user_game_tags.update(tags_value)
-                            elif isinstance(tags_value, str):
-                                user_game_tags.update(tag.strip() for tag in tags_value.split(','))
+            # Try from games_metadata
+            if game_id in games_metadata and 'tags' in games_metadata[game_id]:
+                tags_value = games_metadata[game_id]['tags']
+                if isinstance(tags_value, list):
+                    game_tags = tags_value
+                elif isinstance(tags_value, str):
+                    game_tags = [tag.strip() for tag in tags_value.split(',')]
 
-            # Boost scores for games with matching tags
-            for similar_id in list(similar_game_scores.keys()):
-                game_rows = games_df[games_df['app_id'] == similar_id]
-                if len(game_rows) > 0:
-                    # Get tags safely from the first row
-                    first_row = game_rows.iloc[0]
+            # Calculate tag match score
+            score = 0
+            for tag in game_tags:
+                if tag in user_action_tags:
+                    score += user_action_tags[tag]
 
-                    # FIX: Check if 'tags' column exists in the dataframe
-                    if 'tags' in game_rows.columns:
-                        # Get the tags value for this specific row
-                        tags_value = first_row['tags']
-
-                        # IMPROVED FIX: Extra safety check for pandas Series
-                        # If tags_value is a Series, get the first value with .iloc[0]
-                        if isinstance(tags_value, pd.Series):
-                            # Check if Series is not empty before accessing first element
-                            if len(tags_value) > 0 and pd.notna(tags_value.iloc[0]):
-                                tags_value = tags_value.iloc[0]
-                            else:
-                                continue  # Skip if Series is empty or has NA
-
-                        # Now safely check if tags_value is not NA
-                        if pd.notna(tags_value):
-                            game_tags = []
-                            if isinstance(tags_value, list):
-                                game_tags = tags_value
-                            elif isinstance(tags_value, str):
-                                game_tags = [tag.strip() for tag in tags_value.split(',')]
-
-                            # Calculate tag overlap
-                            common_tags = user_game_tags.intersection(game_tags)
-                            if common_tags:
-                                # Add tag match bonus
-                                tag_bonus = 0.2 * len(common_tags)
-                                similar_game_scores[similar_id] += tag_bonus
+            # Normalize score by number of tags
+            if len(game_tags) > 0:
+                similar_game_scores[game_id] = score / len(game_tags)
 
         # Sort recommendations by score
-        sorted_recommendations = sorted(similar_game_scores.items(), key=lambda x: x[1], reverse=True)[:10]
+        sorted_recommendations = sorted(similar_game_scores.items(), key=lambda x: x[1], reverse=True)[:20]
 
         # If not enough recommendations, add popular games
         if len(sorted_recommendations) < 10:
@@ -1157,14 +1368,14 @@ def custom_recommendations():
             popular_games = get_popular_games(20)
 
             for game_id, popularity in popular_games:
-                if game_id not in already_recommended and game_id not in games_excluded:
+                if game_id not in already_recommended and game_id not in all_action_game_ids:
                     sorted_recommendations.append((game_id, popularity * 0.7))  # Lower weight for popular games
-                    if len(sorted_recommendations) >= 10:
+                    if len(sorted_recommendations) >= 20:
                         break
 
-        # Get game details
+        # Get game details for the top 10
         recommendations_with_details = []
-        for game_id, score in sorted_recommendations:
+        for game_id, score in sorted_recommendations[:10]:
             game_info = get_game_info(game_id)
             if game_info:
                 # Normalize score to 0-1 range
@@ -1172,7 +1383,7 @@ def custom_recommendations():
                 game_info['score'] = float(normalized_score)
                 recommendations_with_details.append(game_info)
 
-        return jsonify({
+        return custom_jsonify({
             'status': 'success',
             'recommendations': recommendations_with_details,
             'is_popular': False
@@ -1181,7 +1392,7 @@ def custom_recommendations():
     except Exception as e:
         logger.error(f"Error generating custom recommendations: {str(e)}")
         logger.error(traceback.format_exc())
-        return jsonify({
+        return custom_jsonify({
             'status': 'error',
             'message': 'Failed to generate recommendations. Please try again later.'
         }), 500
