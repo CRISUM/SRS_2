@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-src/models/knn_model.py - KNN-based collaborative filtering models
+Py_GetModel_src/models/knn_model.py - KNN-based collaborative filtering models
 Author: YourName
 Date: 2025-04-27
 Description: Implements user-based and item-based KNN collaborative filtering

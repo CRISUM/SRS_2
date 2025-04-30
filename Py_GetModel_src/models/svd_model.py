@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-src/models/svd_model.py - Matrix factorization model based on SVD
+Py_GetModel_src/models/svd_model.py - Matrix factorization model based on SVD
 Author: YourName
 Date: 2025-04-27
 Description: Implements collaborative filtering using Singular Value Decomposition

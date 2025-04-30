@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-src/models/hybrid_model.py - Hybrid recommendation model
+Py_GetModel_src/models/hybrid_model.py - Hybrid recommendation model
 Author: YourName
 Date: 2025-04-27
 Description: Implements hybrid recommendation approach combining multiple models

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-src/models/sequence_model.py - Sequential recommendation model
+Py_GetModel_src/models/sequence_model.py - Sequential recommendation model
 Author: YourName
 Date: 2025-04-29
 Description: Implements deep learning based game-to-game sequential recommendation model

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-src/kafka/kafka_consumer_service.py - Kafka consumer service
+Py_GetModel_src/kafka/kafka_consumer_service.py - Kafka consumer service
 Author: YourName
 Date: 2025-04-27
 Description: Service that consumes Kafka messages and updates the recommender

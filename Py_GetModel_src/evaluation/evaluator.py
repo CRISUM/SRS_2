@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-src/evaluation/evaluator.py - Model evaluation module
+Py_GetModel_src/evaluation/evaluator.py - Model evaluation module
 Author: YourName
 Date: 2025-04-27
 Description: Implements metrics and evaluation functions for recommendation models

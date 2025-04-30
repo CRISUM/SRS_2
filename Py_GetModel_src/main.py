@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-src/main.py - Main entry point for Steam Recommender
+Py_GetModel_src/main.py - Main entry point for Steam Recommender
 Author: YourName
 Date: 2025-04-27
 Description: Command-line interface for the Steam Game Recommender System
@@ -12,7 +12,7 @@ import argparse
 import logging
 import json
 import os
-from src.recommender import SteamRecommender
+from Py_GetModel_src.recommender import SteamRecommender
 from kafka.kafka_consumer_service import KafkaRecommenderService
 
 

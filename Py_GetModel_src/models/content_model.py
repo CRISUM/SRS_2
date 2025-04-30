@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-src/models/content_model.py - Enhanced content-based recommendation model
+Py_GetModel_src/models/content_model.py - Enhanced content-based recommendation model
 Author: YourName
 Date: 2025-04-29
 Description: Implements content-based recommendation using item similarities

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-src/models/base_model.py - Base model class for Steam Game Recommendation System
+Py_GetModel_src/models/base_model.py - Base model class for Steam Game Recommendation System
 Author: YourName
 Date: 2025-04-27
 Description: Defines abstract base classes for all recommendation models

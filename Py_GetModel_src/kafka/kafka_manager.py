@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-src/kafka/kafka_manager.py - Kafka integration manager
+Py_GetModel_src/kafka/kafka_manager.py - Kafka integration manager
 Author: YourName
 Date: 2025-04-27
 Description: Manages Kafka connections and message processing
