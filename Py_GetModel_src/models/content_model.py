@@ -8,6 +8,7 @@ Date: 2025-04-29
 Description: Implements content-based recommendation using item similarities
              and TF-IDF for tag processing to improve sparse data performance
 """
+import gc
 
 import numpy as np
 import logging
@@ -38,381 +39,231 @@ class ContentBasedModel(BaseRecommenderModel):
         self.item_metadata = {}  # Store game metadata for better recommendations
 
     def fit(self, data):
-        """Train the model with provided data
+        """Train the model with provided data using memory-efficient optimization
 
         Args:
-            data (dict or DataFrame): Training data
+            data (DataFrame or dict): Training data
 
         Returns:
             self: Trained model
         """
-        logger.info("Training content-based model...")
+        logger.info("Training optimized content-based model...")
 
         try:
-            # Handle dict input format with pre-computed similarities
-            if isinstance(data, dict):
-                if 'similarity_matrix' in data:
-                    self.similarity_matrix = data['similarity_matrix']
-                elif 'embeddings' in data:
-                    # Create similarity matrix from embeddings
-                    embeddings = data['embeddings']
-                    items = list(embeddings.keys())
-
-                    # Create embedding matrix
-                    matrix = np.array([embeddings[item_id] for item_id in items])
-
-                    # Calculate similarity
-                    sim_matrix = cosine_similarity(matrix)
-
-                    # Convert to similarity dictionary
-                    self.similarity_matrix = {}
-                    for i, item_id in enumerate(items):
-                        sims = [(items[j], sim_matrix[i, j]) for j in range(len(items)) if i != j]
-                        sims.sort(key=lambda x: x[1], reverse=True)
-                        self.similarity_matrix[item_id] = sims
-
-                # Store user preferences if provided
-                if 'user_preferences' in data:
-                    self.user_preferences = data['user_preferences']
-
-                # Store popular items if provided
-                if 'popular_items' in data:
-                    self.popular_items = data['popular_items']
-
-                # Store item metadata if provided
-                if 'item_metadata' in data:
-                    self.item_metadata = data['item_metadata']
-
-            # Process DataFrame input
+            # Handle different input formats
+            if isinstance(data, dict) and 'df' in data:
+                df = data['df']
             elif isinstance(data, pd.DataFrame):
                 df = data
+            else:
+                logger.error("Invalid input data format")
+                return self
 
-                # Extract game metadata
-                game_metadata = {}
-                for _, row in df.drop_duplicates('app_id').iterrows():
+            # 1. 对大数据集进行采样
+            original_len = len(df)
+            if len(df) > 300000:
+                logger.info(f"Large dataset detected ({original_len} rows), sampling to 300,000")
+                df = df.sample(n=300000, random_state=42)
+
+            # 2. 限制唯一物品数量
+            unique_items = df['app_id'].nunique()
+            logger.info(f"Dataset contains {unique_items} unique items")
+
+            if unique_items > 10000:
+                # 只保留最受欢迎的10000个物品
+                popular_items = df['app_id'].value_counts().nlargest(10000).index
+                df = df[df['app_id'].isin(popular_items)]
+                logger.info(f"Limited to 10,000 most popular items, {len(df)} rows remaining")
+
+            # 3. 优化处理游戏元数据
+            logger.info("Processing game metadata with optimized method...")
+            game_metadata = {}
+            game_tags = {}
+
+            # 使用更高效的批处理
+            batch_size = 1000
+            unique_items = df['app_id'].unique()
+
+            for i in range(0, len(unique_items), batch_size):
+                batch_items = unique_items[i:i + batch_size]
+                batch_df = df[df['app_id'].isin(batch_items)].drop_duplicates('app_id')
+
+                for _, row in batch_df.iterrows():
                     game_id = row['app_id']
 
-                    # Build feature vector with available columns
-                    features = {
-                        'tags': row.get('tags', '').split(',') if isinstance(row.get('tags', ''), str) else [],
-                        'title': row.get('title', f"Game {game_id}")
-                    }
+                    # 创建简化的元数据
+                    features = {'id': game_id}
 
-                    # Add optional features if available
-                    for col in ['price_final', 'win', 'mac', 'linux', 'rating', 'positive_ratio', 'date_release']:
-                        if col in row and not pd.isna(row[col]):
+                    # 添加标题
+                    if 'title' in row and pd.notna(row['title']):
+                        features['title'] = row['title']
+                    else:
+                        features['title'] = f"Game {game_id}"
+
+                    # 处理标签 - 限制数量
+                    if 'tags' in row and pd.notna(row['tags']) and row['tags']:
+                        tags = [tag.strip() for tag in str(row['tags']).split(',')]
+                        # 最多保留前15个标签
+                        tags = tags[:15]
+                        features['tags'] = tags
+                        game_tags[game_id] = tags
+                    else:
+                        features['tags'] = []
+                        game_tags[game_id] = []
+
+                    # 添加其他可选特征
+                    for col in ['price_final', 'win', 'mac', 'linux', 'rating', 'positive_ratio']:
+                        if col in row and pd.notna(row[col]):
                             features[col] = row[col]
-
-                    # 增强1: 添加描述特征（如果存在）
-                    if 'description' in row and isinstance(row['description'], str) and len(row['description']) > 0:
-                        # 提取描述中的关键词 (简单实现，仅提取长词)
-                        words = [w.lower() for w in row['description'].split() if len(w) > 5]
-                        features['description_keywords'] = words[:20]  # 限制关键词数量
-
-                    # 增强2: 添加加权标签属性
-                    if features['tags']:
-                        weighted_tags = {}
-                        for i, tag in enumerate(features['tags']):
-                            tag = tag.strip()
-                            if tag:
-                                # 根据标签位置给予权重，前面的标签更重要
-                                weight = 1.0 / (i + 1)
-                                weighted_tags[tag] = weight
-                        features['weighted_tags'] = weighted_tags
 
                     game_metadata[game_id] = features
 
-                self.item_metadata = game_metadata
+                # 手动释放内存
+                del batch_df
+                gc.collect()
 
-                # 增强3: 改进游戏相似度计算
-                # Compute game similarities using TF-IDF on tags
-                game_tags = {}
-                for game_id, metadata in game_metadata.items():
-                    # 使用标签和标题共同构建特征文本
-                    tag_text = ' '.join([tag.strip() for tag in metadata['tags']]) if metadata['tags'] else ''
-                    title_text = metadata.get('title', '')
+            self.item_metadata = game_metadata
 
-                    # 增加标题中的词权重
-                    if title_text:
-                        title_words = ' '.join([word.lower() for word in title_text.split()])
-                        # 标题重复两次增加权重
-                        game_tags[game_id] = f"{tag_text} {title_words} {title_words}"
-                    else:
-                        game_tags[game_id] = tag_text
+            # 4. 高效构建相似度矩阵
+            logger.info("Building similarity matrix with optimized method...")
 
-                # 增强4: 调整TF-IDF向量化参数
-                # Use TF-IDF vectorizer with improved parameters
-                vectorizer = TfidfVectorizer(
-                    min_df=1,
-                    max_df=0.8,  # 忽略在80%以上游戏中出现的常见词
-                    ngram_range=(1, 2),  # 使用1-gram和2-gram
-                    stop_words='english'  # 去除英文停用词
-                )
-                all_game_ids = list(game_tags.keys())
-                tag_texts = [game_tags[gid] for gid in all_game_ids]
+            # 只处理有标签的游戏
+            game_ids_with_tags = [gid for gid, tags in game_tags.items() if tags]
 
-                # Check if we have enough data
-                if len(tag_texts) > 1 and any(tag_texts):
-                    tag_matrix = vectorizer.fit_transform(tag_texts)
+            # 如果标签过多，限制处理的游戏数量
+            max_items_to_process = 8000
+            if len(game_ids_with_tags) > max_items_to_process:
+                logger.info(f"Too many games with tags ({len(game_ids_with_tags)}), limiting to {max_items_to_process}")
+                # 保留标签数量最多的游戏
+                games_by_tag_count = [(gid, len(game_tags[gid])) for gid in game_ids_with_tags]
+                games_by_tag_count.sort(key=lambda x: x[1], reverse=True)
+                game_ids_with_tags = [gid for gid, _ in games_by_tag_count[:max_items_to_process]]
 
-                    # 增强5: 加入游戏属性进行相似度计算
-                    # 如果有足够多的游戏有额外属性，可以合并到相似度计算中
-                    has_extra_features = False
-                    price_features = np.zeros((len(all_game_ids), 1))
+            # 5. 使用更高效的相似度计算
+            from joblib import Parallel, delayed
 
-                    for i, game_id in enumerate(all_game_ids):
-                        if 'price_final' in game_metadata[game_id]:
-                            price = float(game_metadata[game_id]['price_final'])
-                            # 价格规范化到0-1范围
-                            price_features[i, 0] = min(1.0, price / 60.0)  # 假设60是最高价格
-                            has_extra_features = True
+            # 定义用于并行处理的函数
+            def compute_similarities_batch(game_id, other_game_ids, game_tags):
+                similarities = []
+                game1_tags = set(game_tags[game_id])
 
-                    # 如果有额外特征，合并到标签矩阵中
-                    if has_extra_features:
-                        # 将价格特征与标签特征结合
-                        # 这里需要将sparse矩阵转换为dense后才能合并
-                        tag_dense = tag_matrix.toarray()
+                for other_id in other_game_ids:
+                    if game_id == other_id:
+                        continue
 
-                        # 对两种特征进行加权合并 (90% 标签, 10% 价格)
-                        combined_features = np.hstack([
-                            tag_dense * 0.9,
-                            price_features * 0.1
-                        ])
+                    game2_tags = set(game_tags[other_id])
 
-                        # 计算相似度
-                        tag_similarity = cosine_similarity(combined_features)
-                    else:
-                        # 使用原始标签矩阵计算相似度
-                        tag_similarity = cosine_similarity(tag_matrix)
+                    # 快速计算Jaccard相似度
+                    intersection = len(game1_tags.intersection(game2_tags))
+                    union = len(game1_tags.union(game2_tags))
 
-                    # Create game similarity dictionary
-                    game_similarities = {}
-                    for i, game_id in enumerate(all_game_ids):
-                        similar_games = []
-                        for j in range(len(all_game_ids)):
-                            if i == j:
-                                continue
+                    similarity = intersection / union if union > 0 else 0
 
-                            game1_tags = set(game_metadata[game_id].get('tags', []))
-                            game2_id = all_game_ids[j]
-                            game2_tags = set(game_metadata[game2_id].get('tags', []))
+                    if similarity > 0.1:  # 只保存相似度大于阈值的项
+                        similarities.append((other_id, similarity))
 
-                            # 计算Jaccard相似度
-                            if game1_tags and game2_tags:
-                                intersection = len(game1_tags.intersection(game2_tags))
-                                union = len(game1_tags.union(game2_tags))
-                                jaccard_sim = intersection / union if union > 0 else 0
+                # 排序并只保留前K个最相似的项
+                similarities.sort(key=lambda x: x[1], reverse=True)
+                return game_id, similarities[:50]  # 最多保留前50个相似游戏
 
-                                # 组合两种相似度，增加权重
-                                combined_sim = (tag_similarity[i, j] * 0.7) + (jaccard_sim * 0.3)
+            # 并行计算相似度
+            logger.info(f"Computing similarities for {len(game_ids_with_tags)} games...")
 
-                                similar_games.append((game2_id, combined_sim))
-                            else:
-                                similar_games.append((game2_id, tag_similarity[i, j]))
+            # 限制核心数
+            n_jobs = min(8, os.cpu_count() or 1)
 
-                        similar_games.sort(key=lambda x: x[1], reverse=True)
-                        game_similarities[game_id] = similar_games
+            # 分批处理
+            batch_size = 50
+            similarity_results = {}
 
-                        # 增强6: 提高相似游戏的多样性
-                        # 根据标签种类进行简单聚类
-                        if len(similar_games) > 10 and 'tags' in game_metadata[game_id]:
-                            diverse_similar = []
-                            seen_tags = set()
-                            source_tags = set(t.strip().lower() for t in game_metadata[game_id]['tags'])
-
-                            # 首先基于分数排序
-                            similar_games.sort(key=lambda x: x[1], reverse=True)
-
-                            # 然后选择具有不同标签的游戏
-                            for sim_game, sim_score in similar_games:
-                                if sim_game in game_metadata and 'tags' in game_metadata[sim_game]:
-                                    sim_tags = set(t.strip().lower() for t in game_metadata[sim_game]['tags'])
-
-                                    # 找出此游戏的主要标签（与源游戏不同的标签）
-                                    diff_tags = sim_tags - source_tags
-                                    if not diff_tags:
-                                        # 如果没有不同的标签，仍添加此游戏
-                                        diverse_similar.append((sim_game, sim_score))
-                                    else:
-                                        # 检查是否有新的主要标签
-                                        main_tag = list(diff_tags)[0] if diff_tags else None
-                                        if main_tag and main_tag not in seen_tags:
-                                            seen_tags.add(main_tag)
-                                            # 增加分数以提高多样性游戏的排名
-                                            diverse_similar.append((sim_game, sim_score * 1.1))
-                                        else:
-                                            diverse_similar.append((sim_game, sim_score))
-                                else:
-                                    diverse_similar.append((sim_game, sim_score))
-
-                            # 重新排序
-                            diverse_similar.sort(key=lambda x: x[1], reverse=True)
-                            similar_games = diverse_similar
-                        else:
-                            similar_games.sort(key=lambda x: x[1], reverse=True)
-
-                        game_similarities[game_id] = similar_games
-
-                    self.similarity_matrix = game_similarities
-                    logger.info(f"Created enhanced similarity matrix with {len(game_similarities)} games")
-                else:
-                    logger.warning("Not enough tag data to create similarity matrix")
-
-                # Extract user preferences from interactions with improved weighting
-                for user_id in df['user_id'].unique():
-                    user_data = df[df['user_id'] == user_id]
-
-                    # 增强7: 改进用户偏好提取
-                    # 创建加权物品列表，根据不同信号给予物品不同权重
-                    weighted_items = {}
-
-                    # 处理显式推荐
-                    if 'is_recommended' in user_data.columns:
-                        for _, row in user_data.iterrows():
-                            game_id = row['app_id']
-                            if row['is_recommended'] == True:
-                                # 基础权重 1.0
-                                base_weight = 1.0
-
-                                # 如果有游戏时间，增加权重
-                                if 'hours' in row and pd.notna(row['hours']) and row['hours'] > 0:
-                                    hours = float(row['hours'])
-                                    # 时间权重: 最高到1.5 (30小时以上)
-                                    time_factor = min(1.5, 1.0 + hours / 60.0)
-                                    base_weight *= time_factor
-
-                                weighted_items[game_id] = weighted_items.get(game_id, 0) + base_weight
-
-                    # 处理评分
-                    elif 'rating' in user_data.columns:
-                        for _, row in user_data.iterrows():
-                            game_id = row['app_id']
-                            if pd.notna(row['rating']) and row['rating'] >= 7:
-                                # 评分7-10的权重从1.0到2.0
-                                rating_weight = 0.5 + (row['rating'] / 10)
-                                weighted_items[game_id] = weighted_items.get(game_id, 0) + rating_weight
-
-                    # 基于游戏时间
-                    else:
-                        try:
-                            avg_hours = user_data['hours'].mean() if 'hours' in user_data else 0
-                            for _, row in user_data.iterrows():
-                                game_id = row['app_id']
-                                if 'hours' in row and pd.notna(row['hours']):
-                                    hours = row['hours']
-                                    if hours > avg_hours:
-                                        # 高于平均时间的游戏获得更高权重
-                                        weighted_items[game_id] = hours / max(1.0, avg_hours)
-                        except:
-                            # 回退到简单列表
-                            positive_items = user_data['app_id'].tolist()
-                            self.user_preferences[user_id] = positive_items
-                            continue  # 跳过后续处理
-
-                    # 根据权重排序物品
-                    sorted_items = sorted(weighted_items.items(), key=lambda x: x[1], reverse=True)
-
-                    # 只保留权重最高的物品（去除异常值）
-                    if len(sorted_items) > 2:
-                        # 保留前75%的物品
-                        cutoff = int(len(sorted_items) * 0.75)
-                        positive_items = [item[0] for item in sorted_items[:max(cutoff, 2)]]
-                    else:
-                        positive_items = [item[0] for item in sorted_items]
-
-                    self.user_preferences[user_id] = positive_items
-
-                # 增强8: 改进热门物品计算
-                # Calculate popular items for fallback with diversity
-                if len(df) > 0:
-                    # 除了流行度，还考虑好评率
-                    game_ratings = {}
-
-                    if 'is_recommended' in df.columns:
-                        for game_id in df['app_id'].unique():
-                            game_data = df[df['app_id'] == game_id]
-                            if len(game_data) >= 3:  # 至少3个评价才计算
-                                pos_ratio = game_data['is_recommended'].mean()
-                                game_ratings[game_id] = pos_ratio
-
-                    # Count games by frequency
-                    game_counts = df['app_id'].value_counts()
-
-                    # Normalize by total users
-                    total_users = df['user_id'].nunique()
-
-                    # 结合流行度和评分计算最终分数
-                    popular_items = []
-                    for game_id, count in game_counts.items():
-                        pop_score = count / total_users
-
-                        # 如果有评分，结合评分和流行度
-                        if game_id in game_ratings:
-                            rating_score = game_ratings[game_id]
-                            final_score = (pop_score * 0.7) + (rating_score * 0.3)
-                        else:
-                            final_score = pop_score
-
-                        popular_items.append((game_id, final_score))
-
-                    # Sort by score
-                    popular_items.sort(key=lambda x: x[1], reverse=True)
-
-                    # 增强9: 添加多样性到热门物品中
-                    if len(popular_items) > 100 and game_metadata:
-                        # 按标签分组
-                        tag_groups = {}
-
-                        # 收集前200个流行游戏
-                        top_games = popular_items[:200]
-
-                        for game_id, score in top_games:
-                            if game_id in game_metadata and 'tags' in game_metadata[game_id]:
-                                for tag in game_metadata[game_id]['tags'][:3]:  # 使用前3个标签
-                                    tag = tag.strip()
-                                    if tag:
-                                        if tag not in tag_groups:
-                                            tag_groups[tag] = []
-                                        tag_groups[tag].append((game_id, score))
-
-                        # 从不同标签组中选择游戏
-                        diverse_popular = []
-
-                        # 按游戏数量排序标签
-                        sorted_tags = sorted(tag_groups.items(), key=lambda x: len(x[1]), reverse=True)
-
-                        # 从每个主要标签中选择顶级游戏
-                        for tag, games in sorted_tags:
-                            if games:
-                                # 排序并选择该标签下最流行的游戏
-                                games.sort(key=lambda x: x[1], reverse=True)
-                                best_game = games[0]
-
-                                # 如果游戏尚未添加，则添加
-                                if best_game[0] not in [g[0] for g in diverse_popular]:
-                                    diverse_popular.append(best_game)
-
-                        # 如果多样性列表足够长，使用它
-                        if len(diverse_popular) >= 50:
-                            # 保留前100个游戏
-                            popular_items = diverse_popular[:100]
-                        else:
-                            # 保留前100个原始流行游戏
-                            popular_items = popular_items[:100]
-                    else:
-                        # Keep top 100
-                        popular_items = popular_items[:100]
-
-                    self.popular_items = popular_items
-
+            for i in range(0, len(game_ids_with_tags), batch_size):
+                batch = game_ids_with_tags[i:i + batch_size]
                 logger.info(
-                    f"Content-based model trained with {len(self.similarity_matrix)} items and enhanced features")
-                return self
+                    f"Processing batch {i // batch_size + 1}/{(len(game_ids_with_tags) + batch_size - 1) // batch_size}")
+
+                batch_results = Parallel(n_jobs=n_jobs, verbose=1)(
+                    delayed(compute_similarities_batch)(game_id, game_ids_with_tags, game_tags)
+                    for game_id in batch
+                )
+
+                # 将结果添加到字典中
+                for game_id, similarities in batch_results:
+                    similarity_results[game_id] = similarities
+
+                # 手动释放内存
+                gc.collect()
+
+            self.similarity_matrix = similarity_results
+
+            # 6. 计算流行度得分以用于冷启动，更轻量级计算
+            if len(df) > 0:
+                # 计算游戏人气
+                game_counts = df['app_id'].value_counts()
+                total_users = df['user_id'].nunique()
+
+                # 计算带评分的热度
+                popular_games = []
+                for game_id, count in game_counts.items()[:100]:  # 只取前100个
+                    # 计算流行度分数
+                    popularity = count / total_users
+
+                    # 如果有推荐信息，考虑正面评价
+                    if 'is_recommended' in df.columns:
+                        game_df = df[df['app_id'] == game_id]
+                        if len(game_df) > 0:
+                            positive_ratio = game_df['is_recommended'].mean()
+                            score = (popularity * 0.7) + (positive_ratio * 0.3)
+                        else:
+                            score = popularity
+                    else:
+                        score = popularity
+
+                    popular_games.append((game_id, score))
+
+                # 按分数排序
+                popular_games.sort(key=lambda x: x[1], reverse=True)
+                self.popular_items = popular_games[:100]  # 只保留前100个
+
+            # 7. 处理用户偏好，但限制处理的用户数量
+            max_users_to_process = 50000
+            user_count = df['user_id'].nunique()
+
+            if user_count > max_users_to_process:
+                logger.info(f"Too many users ({user_count}), limiting to {max_users_to_process} most active")
+                active_users = df['user_id'].value_counts().nlargest(max_users_to_process).index
+                user_df = df[df['user_id'].isin(active_users)]
+            else:
+                user_df = df
+
+            # 处理用户偏好
+            user_preferences = {}
+            for user_id in user_df['user_id'].unique():
+                user_data = user_df[user_df['user_id'] == user_id]
+
+                # 简化处理: 只保留用户喜欢的游戏ID
+                if 'is_recommended' in user_data.columns:
+                    liked_items = user_data[user_data['is_recommended'] == True]['app_id'].tolist()
+                elif 'hours' in user_data.columns:
+                    # 使用游戏时长作为喜好指标
+                    avg_hours = user_data['hours'].mean()
+                    liked_items = user_data[user_data['hours'] >= avg_hours]['app_id'].tolist()
+                else:
+                    liked_items = user_data['app_id'].tolist()
+
+                # 只保存有喜好的用户
+                if liked_items:
+                    user_preferences[user_id] = liked_items
+
+            self.user_preferences = user_preferences
+
+            logger.info(f"Content-based model trained with {len(self.similarity_matrix)} items")
+            return self
 
         except Exception as e:
             logger.error(f"Error training content-based model: {str(e)}")
             logger.error(traceback.format_exc())
             return self
+
     def predict(self, user_id, item_id):
         """Predict rating for a user-item pair
 
@@ -599,7 +450,7 @@ class ContentBasedModel(BaseRecommenderModel):
             return self
 
     def save(self, path):
-        """Save model to disk
+        """Save model to disk with optimization for large models
 
         Args:
             path (str): Directory path
@@ -612,30 +463,93 @@ class ContentBasedModel(BaseRecommenderModel):
         try:
             os.makedirs(path, exist_ok=True)
 
-            # Save similarity matrix
-            with open(os.path.join(path, 'content_similarity.pkl'), 'wb') as f:
-                pickle.dump(self.similarity_matrix, f)
+            # 1. 优化相似度矩阵保存 - 分块保存
+            logger.info("Saving similarity matrix in chunks...")
+            similarity_chunks = {}
+            chunk_size = 1000
+            matrix_keys = list(self.similarity_matrix.keys())
 
-            # Save user preferences
-            with open(os.path.join(path, 'user_preferences.pkl'), 'wb') as f:
-                pickle.dump(self.user_preferences, f)
+            for i in range(0, len(matrix_keys), chunk_size):
+                chunk_keys = matrix_keys[i:i + chunk_size]
+                chunk_data = {k: self.similarity_matrix[k] for k in chunk_keys}
 
-            # Save popular items
+                # 保存这个分块
+                chunk_path = os.path.join(path, f'content_similarity_chunk_{i // chunk_size}.pkl')
+                with open(chunk_path, 'wb') as f:
+                    pickle.dump(chunk_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+                # 记录这个分块包含的键
+                similarity_chunks[f'chunk_{i // chunk_size}'] = chunk_keys
+
+            # 保存分块信息
+            with open(os.path.join(path, 'similarity_chunks.pkl'), 'wb') as f:
+                pickle.dump(similarity_chunks, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+            # 2. 优化用户偏好保存 - 如果数据量大
+            if len(self.user_preferences) > 10000:
+                logger.info("Saving user preferences in chunks...")
+                user_chunks = {}
+                user_keys = list(self.user_preferences.keys())
+
+                for i in range(0, len(user_keys), chunk_size):
+                    chunk_keys = user_keys[i:i + chunk_size]
+                    chunk_data = {k: self.user_preferences[k] for k in chunk_keys}
+
+                    # 保存这个分块
+                    chunk_path = os.path.join(path, f'user_preferences_chunk_{i // chunk_size}.pkl')
+                    with open(chunk_path, 'wb') as f:
+                        pickle.dump(chunk_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+                    # 记录这个分块包含的键
+                    user_chunks[f'chunk_{i // chunk_size}'] = chunk_keys
+
+                # 保存分块信息
+                with open(os.path.join(path, 'user_preference_chunks.pkl'), 'wb') as f:
+                    pickle.dump(user_chunks, f, protocol=pickle.HIGHEST_PROTOCOL)
+            else:
+                # 数据量小，直接保存整个字典
+                with open(os.path.join(path, 'user_preferences.pkl'), 'wb') as f:
+                    pickle.dump(self.user_preferences, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+            # 3. 优化物品元数据保存 - 压缩或分块
+            if len(self.item_metadata) > 10000:
+                logger.info("Saving item metadata in chunks...")
+                metadata_chunks = {}
+                metadata_keys = list(self.item_metadata.keys())
+
+                for i in range(0, len(metadata_keys), chunk_size):
+                    chunk_keys = metadata_keys[i:i + chunk_size]
+                    chunk_data = {k: self.item_metadata[k] for k in chunk_keys}
+
+                    # 保存这个分块
+                    chunk_path = os.path.join(path, f'item_metadata_chunk_{i // chunk_size}.pkl')
+                    with open(chunk_path, 'wb') as f:
+                        pickle.dump(chunk_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+                    # 记录这个分块包含的键
+                    metadata_chunks[f'chunk_{i // chunk_size}'] = chunk_keys
+
+                # 保存分块信息
+                with open(os.path.join(path, 'metadata_chunks.pkl'), 'wb') as f:
+                    pickle.dump(metadata_chunks, f, protocol=pickle.HIGHEST_PROTOCOL)
+            else:
+                # 数据量小，直接保存
+                with open(os.path.join(path, 'item_metadata.pkl'), 'wb') as f:
+                    pickle.dump(self.item_metadata, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+            # 4. 保存热门物品列表 - 体积小，直接保存
             with open(os.path.join(path, 'popular_items.pkl'), 'wb') as f:
-                pickle.dump(self.popular_items, f)
+                pickle.dump(self.popular_items, f, protocol=pickle.HIGHEST_PROTOCOL)
 
-            # Save item metadata
-            with open(os.path.join(path, 'item_metadata.pkl'), 'wb') as f:
-                pickle.dump(self.item_metadata, f)
-
-            logger.info("Content-based model saved successfully")
+            logger.info("Content-based model saved successfully with optimized method")
             return True
         except Exception as e:
             logger.error(f"Error saving content-based model: {str(e)}")
+            logger.error(traceback.format_exc())
             return False
 
     def load(self, path):
-        """Load model from disk
+        """Load model from disk with optimization for chunked files
 
         Args:
             path (str): Directory path
@@ -646,32 +560,120 @@ class ContentBasedModel(BaseRecommenderModel):
         logger.info(f"Loading content-based model from {path}")
 
         try:
-            # Load similarity matrix
-            with open(os.path.join(path, 'content_similarity.pkl'), 'rb') as f:
-                self.similarity_matrix = pickle.load(f)
+            # 1. 加载相似度矩阵 - 处理分块
+            similarity_chunks_path = os.path.join(path, 'similarity_chunks.pkl')
+            if os.path.exists(similarity_chunks_path):
+                logger.info("Loading chunked similarity matrix...")
+                with open(similarity_chunks_path, 'rb') as f:
+                    similarity_chunks = pickle.load(f)
 
-            # Load user preferences if available
-            user_prefs_path = os.path.join(path, 'user_preferences.pkl')
-            if os.path.exists(user_prefs_path):
-                with open(user_prefs_path, 'rb') as f:
-                    self.user_preferences = pickle.load(f)
+                # 初始化空字典
+                self.similarity_matrix = {}
 
-            # Load popular items if available
+                # 逐个加载分块
+                for chunk_id, chunk_keys in similarity_chunks.items():
+                    chunk_num = int(chunk_id.split('_')[1])
+                    chunk_path = os.path.join(path, f'content_similarity_chunk_{chunk_num}.pkl')
+
+                    if os.path.exists(chunk_path):
+                        with open(chunk_path, 'rb') as f:
+                            chunk_data = pickle.load(f)
+
+                        # 合并到主字典
+                        self.similarity_matrix.update(chunk_data)
+                    else:
+                        logger.warning(f"Missing chunk file: {chunk_path}")
+            else:
+                # 尝试加载单一文件
+                single_path = os.path.join(path, 'content_similarity.pkl')
+                if os.path.exists(single_path):
+                    with open(single_path, 'rb') as f:
+                        self.similarity_matrix = pickle.load(f)
+                else:
+                    logger.warning("No similarity matrix files found")
+                    self.similarity_matrix = {}
+
+            # 2. 加载用户偏好 - 处理分块
+            user_chunks_path = os.path.join(path, 'user_preference_chunks.pkl')
+            if os.path.exists(user_chunks_path):
+                logger.info("Loading chunked user preferences...")
+                with open(user_chunks_path, 'rb') as f:
+                    user_chunks = pickle.load(f)
+
+                # 初始化空字典
+                self.user_preferences = {}
+
+                # 逐个加载分块
+                for chunk_id, chunk_keys in user_chunks.items():
+                    chunk_num = int(chunk_id.split('_')[1])
+                    chunk_path = os.path.join(path, f'user_preferences_chunk_{chunk_num}.pkl')
+
+                    if os.path.exists(chunk_path):
+                        with open(chunk_path, 'rb') as f:
+                            chunk_data = pickle.load(f)
+
+                        # 合并到主字典
+                        self.user_preferences.update(chunk_data)
+                    else:
+                        logger.warning(f"Missing chunk file: {chunk_path}")
+            else:
+                # 尝试加载单一文件
+                single_path = os.path.join(path, 'user_preferences.pkl')
+                if os.path.exists(single_path):
+                    with open(single_path, 'rb') as f:
+                        self.user_preferences = pickle.load(f)
+                else:
+                    logger.warning("No user preferences files found")
+                    self.user_preferences = {}
+
+            # 3. 加载物品元数据 - 处理分块
+            metadata_chunks_path = os.path.join(path, 'metadata_chunks.pkl')
+            if os.path.exists(metadata_chunks_path):
+                logger.info("Loading chunked item metadata...")
+                with open(metadata_chunks_path, 'rb') as f:
+                    metadata_chunks = pickle.load(f)
+
+                # 初始化空字典
+                self.item_metadata = {}
+
+                # 逐个加载分块
+                for chunk_id, chunk_keys in metadata_chunks.items():
+                    chunk_num = int(chunk_id.split('_')[1])
+                    chunk_path = os.path.join(path, f'item_metadata_chunk_{chunk_num}.pkl')
+
+                    if os.path.exists(chunk_path):
+                        with open(chunk_path, 'rb') as f:
+                            chunk_data = pickle.load(f)
+
+                        # 合并到主字典
+                        self.item_metadata.update(chunk_data)
+                    else:
+                        logger.warning(f"Missing chunk file: {chunk_path}")
+            else:
+                # 尝试加载单一文件
+                single_path = os.path.join(path, 'item_metadata.pkl')
+                if os.path.exists(single_path):
+                    with open(single_path, 'rb') as f:
+                        self.item_metadata = pickle.load(f)
+                else:
+                    logger.warning("No item metadata files found")
+                    self.item_metadata = {}
+
+            # 4. 加载热门物品
             popular_items_path = os.path.join(path, 'popular_items.pkl')
             if os.path.exists(popular_items_path):
                 with open(popular_items_path, 'rb') as f:
                     self.popular_items = pickle.load(f)
+            else:
+                logger.warning("No popular items file found")
+                self.popular_items = []
 
-            # Load item metadata if available
-            metadata_path = os.path.join(path, 'item_metadata.pkl')
-            if os.path.exists(metadata_path):
-                with open(metadata_path, 'rb') as f:
-                    self.item_metadata = pickle.load(f)
-
-            logger.info("Content-based model loaded successfully")
+            logger.info(
+                f"Content-based model loaded successfully: {len(self.similarity_matrix)} items with similarities")
             return self
         except Exception as e:
             logger.error(f"Error loading content-based model: {str(e)}")
+            logger.error(traceback.format_exc())
             return None
 
     def recommend(self, user_id, n=10):

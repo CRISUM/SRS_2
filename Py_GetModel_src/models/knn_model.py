@@ -7,9 +7,11 @@ Author: YourName
 Date: 2025-04-27
 Description: Implements user-based and item-based KNN collaborative filtering
 """
+import traceback
 
 import numpy as np
 import pandas as pd
+from joblib import Parallel, delayed
 from scipy.sparse import csr_matrix
 from sklearn.neighbors import NearestNeighbors
 import logging
@@ -47,10 +49,46 @@ class KNNModel(BaseRecommenderModel):
 
     # 修改 knn_model.py 中的 fit 方法，使用稀疏矩阵直接拟合
     def fit(self, data):
-        """Train the model with provided data"""
-        logger.info(f"Training {self.type}-based KNN model...")
+        """Train the model with provided data with balanced speed-accuracy tradeoff"""
+        logger.info(f"Training {self.type}-based KNN model with balanced optimization...")
 
         if isinstance(data, pd.DataFrame):
+            original_size = len(data)
+
+            # 1. 适度采样 - 不要过度缩减数据
+            if len(data) > 400000:  # 更大的阈值
+                logger.info(f"Large dataset ({len(data)} rows), sampling to 400,000 rows")
+                data = data.sample(n=400000, random_state=42)
+
+            # 2. 更温和的过滤 - 保留更多的有价值数据
+            item_counts = data['app_id'].value_counts()
+            user_counts = data['user_id'].value_counts()
+
+            # 保留至少有2次交互的物品（更少的过滤）
+            popular_items = item_counts[item_counts >= 2].index
+            # 更大的物品集
+            if len(popular_items) > 8000:  # 增加上限
+                popular_items = item_counts.nlargest(8000).index
+
+            # 对用户更少的限制
+            if self.type == 'user':
+                # 对于用户KNN，不过滤用户，但可能限制物品
+                filtered_data = data[data['app_id'].isin(popular_items)]
+            else:
+                # 对于物品KNN，保留更多的用户数据
+                active_users = user_counts[user_counts >= 1].index  # 更少的过滤
+                if len(active_users) > 20000:  # 增加上限
+                    active_users = user_counts.nlargest(20000).index
+
+                filtered_data = data[data['app_id'].isin(popular_items) & data['user_id'].isin(active_users)]
+
+            logger.info(f"Filtered from {original_size} to {len(filtered_data)} rows (more moderate filtering)")
+            logger.info(
+                f"Working with {filtered_data['user_id'].nunique()} users and {filtered_data['app_id'].nunique()} items")
+
+            # 使用过滤后的数据
+            data = filtered_data
+
             # 创建用户和物品的索引映射
             user_ids = data['user_id'].astype('category')
             item_ids = data['app_id'].astype('category')
@@ -63,11 +101,13 @@ class KNNModel(BaseRecommenderModel):
             self.reversed_user_indices = {i: user for user, i in self.user_indices.items()}
             self.reversed_item_indices = {i: item for item, i in self.item_indices.items()}
 
-            # 确定评分值（小时数或推荐状态）
+            # 3. 保留原始评分尺度 - 不二值化
             if 'is_recommended' in data.columns:
-                ratings = data['is_recommended'].astype(int) * 10
+                # 使用更细粒度的评分
+                ratings = data['is_recommended'].astype(int) * 5  # 0或5，而不是0或1
             else:
-                ratings = data['hours'].fillna(0)
+                # 保留更多小时数信息
+                ratings = data['hours'].fillna(0).clip(0, 100)  # 裁剪极端值但保留连续尺度
 
             # 创建稀疏矩阵
             row = user_ids.cat.codes
@@ -81,66 +121,151 @@ class KNNModel(BaseRecommenderModel):
                 index=user_ids.cat.categories,
                 columns=item_ids.cat.categories)
 
-        # 初始化和训练模型
-        if self.metric == 'jaccard':
-            from sklearn.metrics import jaccard_score
+            logger.info(
+                f"Sparse matrix shape: {self.sparse_matrix.shape}, density: {self.sparse_matrix.nnz / (self.sparse_matrix.shape[0] * self.sparse_matrix.shape[1]):.6f}")
 
-            # 自定义Jaccard相似度函数
-            def jaccard_similarity(x, y):
-                # 转换为二进制向量 (非零值视为1)
-                x_bin = x > 0
-                y_bin = y > 0
-
-                # 计算交集和并集大小
-                intersection = np.logical_and(x_bin, y_bin).sum()
-                union = np.logical_or(x_bin, y_bin).sum()
-
-                # 返回Jaccard相似度
-                return intersection / union if union > 0 else 0
-
-            self.model = NearestNeighbors(n_neighbors=self.n_neighbors,
-                                          metric='precomputed',
-                                          algorithm='brute')
-
-            # 为KNN模型创建相似度矩阵
-            if self.type == 'user':
-                n_samples = self.sparse_matrix.shape[0]
-                sim_matrix = np.zeros((n_samples, n_samples))
-
-                for i in range(n_samples):
-                    for j in range(i + 1, n_samples):
-                        sim = jaccard_similarity(self.sparse_matrix[i].toarray().flatten(),
-                                                 self.sparse_matrix[j].toarray().flatten())
-                        sim_matrix[i, j] = sim
-                        sim_matrix[j, i] = sim  # 对称矩阵
-
-                self.model.fit(sim_matrix)
-            else:  # item-based
-                n_samples = self.sparse_matrix.shape[1]
-                sim_matrix = np.zeros((n_samples, n_samples))
-
-                for i in range(n_samples):
-                    for j in range(i + 1, n_samples):
-                        sim = jaccard_similarity(self.sparse_matrix[:, i].toarray().flatten(),
-                                                 self.sparse_matrix[:, j].toarray().flatten())
-                        sim_matrix[i, j] = sim
-                        sim_matrix[j, i] = sim  # 对称矩阵
-
-                self.model.fit(sim_matrix)
-        else:
-            # 原始代码逻辑，使用指定的metric
-            self.model = NearestNeighbors(n_neighbors=self.n_neighbors,
-                                          metric=self.metric,
-                                          algorithm=self.algorithm)
-
-            if self.type == 'user':
-                self.model.fit(self.sparse_matrix)
+            # 4. 根据数据量动态调整邻居数
+            max_dimension = max(self.sparse_matrix.shape)
+            if max_dimension > 10000:
+                dynamic_neighbors = 20  # 较大数据集用较少邻居
             else:
-                self.model.fit(self.sparse_matrix.T)
+                dynamic_neighbors = min(30, self.n_neighbors)  # 较小数据集用较多邻居
 
+            if self.n_neighbors > dynamic_neighbors:
+                logger.info(f"Adjusting n_neighbors from {self.n_neighbors} to {dynamic_neighbors} based on data size")
+                self.n_neighbors = dynamic_neighbors
 
-        logger.info(f"{self.type}-based KNN model trained successfully")
-        return self
+            # 5. 根据数据大小选择算法
+            if self.metric == 'jaccard' and max_dimension > 10000:
+                logger.info(f"Large dataset with dimension {max_dimension}, switching to optimized computation...")
+
+                # 导入必要的库
+                from joblib import Parallel, delayed
+                import numpy as np
+                import os
+
+                # 决定使用哪种计算模式
+                if max_dimension > 20000:
+                    # 5.1 对于极大规模的数据，使用余弦相似度+批处理
+                    logger.info("Dataset too large for Jaccard, using optimized cosine similarity")
+                    self.model = NearestNeighbors(
+                        n_neighbors=self.n_neighbors,
+                        metric='cosine',
+                        algorithm='auto',
+                        n_jobs=-1
+                    )
+
+                    if self.type == 'user':
+                        self.model.fit(self.sparse_matrix)
+                    else:
+                        self.model.fit(self.sparse_matrix.T)
+
+                else:
+                    # 5.2 对于中等规模的数据，使用优化的Jaccard计算
+                    logger.info("Using optimized Jaccard computation")
+
+                    # 定义Jaccard计算函数
+                    def compute_jaccard_row(i, sparse_matrix, indices):
+                        """计算一行的Jaccard相似度"""
+                        results = []
+                        if self.type == 'user':
+                            i_vector = sparse_matrix[i].toarray().ravel() > 0
+                        else:
+                            i_vector = sparse_matrix[:, i].toarray().ravel() > 0
+
+                        for j in indices:
+                            if i == j:
+                                results.append(0)  # 同一项相似度为0
+                                continue
+
+                            if self.type == 'user':
+                                j_vector = sparse_matrix[j].toarray().ravel() > 0
+                            else:
+                                j_vector = sparse_matrix[:, j].toarray().ravel() > 0
+
+                            # 计算Jaccard相似度
+                            intersection = np.sum(i_vector & j_vector)
+                            union = np.sum(i_vector | j_vector)
+                            similarity = intersection / union if union > 0 else 0
+
+                            results.append(similarity)
+
+                        return results
+
+                    # 确定样本数量和批次
+                    if self.type == 'user':
+                        n_samples = self.sparse_matrix.shape[0]
+                    else:
+                        n_samples = self.sparse_matrix.shape[1]
+
+                    # 限制样本数量，但保持较大的集合
+                    max_samples = 5000  # 更大的样本集
+                    if n_samples > max_samples:
+                        indices = np.random.choice(n_samples, max_samples, replace=False)
+                        sim_indices = indices
+                    else:
+                        indices = np.arange(n_samples)
+                        sim_indices = indices
+
+                    # 计算相似度矩阵
+                    logger.info(f"Computing Jaccard similarity for {len(indices)} samples...")
+
+                    # 使用多进程计算，但限制核心数避免过载
+                    n_jobs = min(8, os.cpu_count() or 1)
+                    logger.info(f"Using {n_jobs} parallel workers")
+
+                    # 分批计算以减少内存使用
+                    batch_size = 100
+                    similarity_matrix = np.zeros((len(indices), len(indices)))
+
+                    for start in range(0, len(indices), batch_size):
+                        end = min(start + batch_size, len(indices))
+                        batch_indices = indices[start:end]
+                        logger.info(
+                            f"Processing batch {start // batch_size + 1}/{(len(indices) + batch_size - 1) // batch_size}")
+
+                        # 并行计算这一批的相似度
+                        batch_similarities = Parallel(n_jobs=n_jobs, verbose=1)(
+                            delayed(compute_jaccard_row)(i, self.sparse_matrix, sim_indices)
+                            for i in batch_indices
+                        )
+
+                        # 更新相似度矩阵
+                        for i, similarities in zip(range(start, end), batch_similarities):
+                            similarity_matrix[i - start] = similarities
+
+                        # 手动垃圾回收
+                        import gc
+                        gc.collect()
+
+                    # 创建并训练KNN模型
+                    self.model = NearestNeighbors(
+                        n_neighbors=min(self.n_neighbors, len(indices) - 1),
+                        metric='precomputed',
+                        algorithm='brute'
+                    )
+                    self.model.fit(1 - similarity_matrix)  # 距离 = 1 - 相似度
+
+                    # 保存采样索引，用于推荐阶段
+                    self.sampled_indices = sim_indices
+
+            else:
+                # 6. 标准方法训练KNN模型
+                logger.info(f"Using standard method with {self.metric} metric")
+                self.model = NearestNeighbors(
+                    n_neighbors=self.n_neighbors,
+                    metric=self.metric,
+                    algorithm='auto',
+                    n_jobs=-1
+                )
+
+                if self.type == 'user':
+                    self.model.fit(self.sparse_matrix)
+                else:
+                    self.model.fit(self.sparse_matrix.T)
+
+            logger.info(f"{self.type}-based KNN model trained successfully")
+            return self
 
     def predict(self, user_id, item_id):
         """Predict rating for a user-item pair
@@ -261,15 +386,7 @@ class KNNModel(BaseRecommenderModel):
             return 0.5
 
     def recommend(self, user_id, n=10):
-        """Generate top-N recommendations for a user
-
-        Args:
-            user_id: User ID
-            n (int): Number of recommendations
-
-        Returns:
-            list: List of (item_id, score) tuples
-        """
+        """Generate recommendations handling sampled indices if necessary"""
         if self.model is None:
             logger.warning("Model not trained yet")
             return []
@@ -282,128 +399,169 @@ class KNNModel(BaseRecommenderModel):
         try:
             user_idx = self.user_indices[user_id]
 
-            # Get user's already seen items
-            user_vector = self.sparse_matrix[user_idx].toarray().ravel()
-            seen_indices = np.where(user_vector > 0)[0]
-            seen_items = {self.reversed_item_indices[idx] for idx in seen_indices}
+            # 如果我们使用了采样，需要特殊处理
+            if hasattr(self, 'sampled_indices'):
+                # 检查用户是否在采样中（对于用户KNN）
+                if self.type == 'user':
+                    if user_idx not in self.sampled_indices:
+                        logger.debug(f"User {user_id} not in sampled indices, using fallback")
+                        return []  # 或使用备选推荐方法
 
-            if self.type == 'user':
-                # User-based recommendation
-                # Get user vector
-                user_vector = self.sparse_matrix[user_idx].toarray().reshape(1, -1)
+                    # 映射到采样索引
+                    sampled_idx = np.where(self.sampled_indices == user_idx)[0][0]
 
-                # Find most similar users
-                distances, indices = self.model.kneighbors(
-                    user_vector,
-                    n_neighbors=min(self.n_neighbors, self.sparse_matrix.shape[0] - 1)
-                )
-
-                # Calculate weighted score from similar users
-                similar_users = indices[0]
-                similarities = 1 - distances[0]  # Convert distance to similarity
-
-                # Filter out the user itself
-                if user_idx in similar_users:
-                    user_idx_pos = np.where(similar_users == user_idx)[0][0]
-                    similar_users = np.delete(similar_users, user_idx_pos)
-                    similarities = np.delete(similarities, user_idx_pos)
-
-                if len(similar_users) == 0:
-                    return []
-
-                # Calculate predicted scores for all items
-                item_scores = {}
-
-                for item_id, item_idx in self.item_indices.items():
-                    # Skip already seen items
-                    if item_id in seen_items:
-                        continue
-
-                    # Get similar users' ratings for this item
-                    ratings = []
-                    for i, similar_user_idx in enumerate(similar_users):
-                        rating = self.sparse_matrix[similar_user_idx, item_idx]
-                        if rating > 0:  # Only consider non-zero ratings
-                            ratings.append((rating, similarities[i]))
-
-                    if not ratings:
-                        continue
-
-                    # Weighted average of ratings
-                    weighted_sum = sum(rating * similarity for rating, similarity in ratings)
-                    similarity_sum = sum(similarity for _, similarity in ratings)
-
-                    if similarity_sum == 0:
-                        continue
-
-                    predicted_rating = weighted_sum / similarity_sum
-
-                    # Normalize and store
-                    max_rating = 10  # Assuming ratings are on a 0-10 scale
-                    item_scores[item_id] = predicted_rating / max_rating
-
-            else:
-                # Item-based recommendation
-                # Calculate predicted scores for all items
-                item_scores = {}
-
-                for item_id, item_idx in self.item_indices.items():
-                    # Skip already seen items
-                    if item_id in seen_items:
-                        continue
-
-                    # Get item vector
-                    item_vector = self.sparse_matrix[:, item_idx].T.toarray().reshape(1, -1)
-
-                    # Find most similar items that the user has rated
+                    # 获取相似用户
                     distances, indices = self.model.kneighbors(
-                        item_vector,
-                        n_neighbors=min(self.n_neighbors, self.sparse_matrix.shape[1] - 1)
+                        np.array([sampled_idx]).reshape(1, -1),
+                        n_neighbors=min(self.n_neighbors, len(self.sampled_indices) - 1)
                     )
 
-                    similar_items = indices[0]
+                    # 映射回原始索引
+                    similar_users = [self.sampled_indices[idx] for idx in indices[0]]
+                    similarities = 1 - distances[0]  # 相似度 = 1 - 距离
+                else:
+                    # 正常流程，但使用采样索引
+                    similar_items = []
+                    for item_id, item_idx in self.item_indices.items():
+                        if item_id in self.user_history.get(user_id, []):
+                            continue  # 跳过用户已有物品
+
+                        # 检查物品是否在采样中
+                        if item_idx not in self.sampled_indices:
+                            continue
+
+                        # 计算得分
+                        score = self.predict(user_id, item_id)
+                        similar_items.append((item_id, score))
+
+                    # 按分数排序
+                    similar_items.sort(key=lambda x: x[1], reverse=True)
+                    return similar_items[:n]
+            else:
+                # 标准KNN推荐流程
+                # Get user's already seen items
+                user_vector = self.sparse_matrix[user_idx].toarray().ravel()
+                seen_indices = np.where(user_vector > 0)[0]
+                seen_items = {self.reversed_item_indices[idx] for idx in seen_indices}
+
+                # 根据KNN类型使用不同策略
+                if self.type == 'user':
+                    # User-based recommendation
+                    user_vector = user_vector.reshape(1, -1)
+
+                    # Find most similar users
+                    distances, indices = self.model.kneighbors(
+                        user_vector,
+                        n_neighbors=min(self.n_neighbors, self.sparse_matrix.shape[0] - 1)
+                    )
+
+                    # Calculate weighted score from similar users
+                    similar_users = indices[0]
                     similarities = 1 - distances[0]  # Convert distance to similarity
 
-                    # Filter out the item itself
-                    if item_idx in similar_items:
-                        item_idx_pos = np.where(similar_items == item_idx)[0][0]
-                        similar_items = np.delete(similar_items, item_idx_pos)
-                        similarities = np.delete(similarities, item_idx_pos)
+                    # Filter out the user itself
+                    if user_idx in similar_users:
+                        user_idx_pos = np.where(similar_users == user_idx)[0][0]
+                        similar_users = np.delete(similar_users, user_idx_pos)
+                        similarities = np.delete(similarities, user_idx_pos)
 
-                    if len(similar_items) == 0:
-                        continue
+                    if len(similar_users) == 0:
+                        return []
 
-                    # Get user's ratings for similar items
-                    ratings = []
-                    for i, similar_item_idx in enumerate(similar_items):
-                        rating = self.sparse_matrix[user_idx, similar_item_idx]
-                        if rating > 0:  # Only consider non-zero ratings
-                            ratings.append((rating, similarities[i]))
+                    # Calculate predicted scores for all items
+                    item_scores = {}
 
-                    if not ratings:
-                        continue
+                    for item_id, item_idx in self.item_indices.items():
+                        # Skip already seen items
+                        if item_id in seen_items:
+                            continue
 
-                    # Weighted average of ratings
-                    weighted_sum = sum(rating * similarity for rating, similarity in ratings)
-                    similarity_sum = sum(similarity for _, similarity in ratings)
+                        # Get similar users' ratings for this item
+                        ratings = []
+                        for i, similar_user_idx in enumerate(similar_users):
+                            rating = self.sparse_matrix[similar_user_idx, item_idx]
+                            if rating > 0:  # Only consider non-zero ratings
+                                ratings.append((rating, similarities[i]))
 
-                    if similarity_sum == 0:
-                        continue
+                        if not ratings:
+                            continue
 
-                    predicted_rating = weighted_sum / similarity_sum
+                        # Weighted average of ratings
+                        weighted_sum = sum(rating * similarity for rating, similarity in ratings)
+                        similarity_sum = sum(similarity for _, similarity in ratings)
 
-                    # Normalize and store
-                    max_rating = 10  # Assuming ratings are on a 0-10 scale
-                    item_scores[item_id] = predicted_rating / max_rating
+                        if similarity_sum == 0:
+                            continue
 
-            # Sort by score in descending order
-            sorted_items = sorted(item_scores.items(), key=lambda x: x[1], reverse=True)
+                        predicted_rating = weighted_sum / similarity_sum
 
-            # Return top N
-            return sorted_items[:n]
+                        # Normalize and store
+                        max_rating = 10  # Assuming ratings are on a 0-10 scale
+                        item_scores[item_id] = predicted_rating / max_rating
+
+                else:
+                    # Item-based recommendation
+                    # Calculate predicted scores for all items
+                    item_scores = {}
+
+                    for item_id, item_idx in self.item_indices.items():
+                        # Skip already seen items
+                        if item_id in seen_items:
+                            continue
+
+                        # Get item vector
+                        item_vector = self.sparse_matrix[:, item_idx].T.toarray().reshape(1, -1)
+
+                        # Find most similar items that the user has rated
+                        distances, indices = self.model.kneighbors(
+                            item_vector,
+                            n_neighbors=min(self.n_neighbors, self.sparse_matrix.shape[1] - 1)
+                        )
+
+                        similar_items = indices[0]
+                        similarities = 1 - distances[0]  # Convert distance to similarity
+
+                        # Filter out the item itself
+                        if item_idx in similar_items:
+                            item_idx_pos = np.where(similar_items == item_idx)[0][0]
+                            similar_items = np.delete(similar_items, item_idx_pos)
+                            similarities = np.delete(similarities, item_idx_pos)
+
+                        if len(similar_items) == 0:
+                            continue
+
+                        # Get user's ratings for similar items
+                        ratings = []
+                        for i, similar_item_idx in enumerate(similar_items):
+                            rating = self.sparse_matrix[user_idx, similar_item_idx]
+                            if rating > 0:  # Only consider non-zero ratings
+                                ratings.append((rating, similarities[i]))
+
+                        if not ratings:
+                            continue
+
+                        # Weighted average of ratings
+                        weighted_sum = sum(rating * similarity for rating, similarity in ratings)
+                        similarity_sum = sum(similarity for _, similarity in ratings)
+
+                        if similarity_sum == 0:
+                            continue
+
+                        predicted_rating = weighted_sum / similarity_sum
+
+                        # Normalize and store
+                        max_rating = 10  # Assuming ratings are on a 0-10 scale
+                        item_scores[item_id] = predicted_rating / max_rating
+
+                # Sort by score in descending order
+                sorted_items = sorted(item_scores.items(), key=lambda x: x[1], reverse=True)
+
+                # Return top N
+                return sorted_items[:n]
 
         except Exception as e:
             logger.error(f"Error in KNN recommendation: {str(e)}")
+            logger.error(traceback.format_exc())
             return []
 
     def update(self, new_data):
@@ -605,3 +763,4 @@ class KNNModel(BaseRecommenderModel):
         except Exception as e:
             logger.error(f"Error loading KNN model: {str(e)}")
             return None
+

@@ -154,8 +154,8 @@ class SteamRecommender:
             return False
 
     def train_models(self):
-        """Train all recommendation models"""
-        logger.info("Training recommendation models...")
+        """Train all recommendation models optimized for extreme data sparsity"""
+        logger.info("Training recommendation models for extremely sparse data...")
 
         try:
             # Make sure data is loaded and processed
@@ -166,98 +166,86 @@ class SteamRecommender:
             train_df = self.data_processor.train_df
             test_df = self.data_processor.test_df
 
-            # 1. Train KNN models
-            logger.info("Training User-based KNN model...")
+            # 1. Train Item-based KNN model with optimized parameters
+            logger.info("Training Item-based KNN model with jaccard similarity...")
+            item_knn = KNNModel(type='item',
+                                n_neighbors=min(20, self.config['knn_params']['item_neighbors']),
+                                metric='jaccard',  # Use jaccard similarity for sparse data
+                                algorithm='brute')
+            item_knn.fit(train_df)
+            self.models['item_knn'] = item_knn
+
+            # 2. Train lightweight User-based KNN model (less important for sparse data)
+            logger.info("Training lightweight User-based KNN model...")
             user_knn = KNNModel(type='user',
-                                n_neighbors=self.config['knn_params']['user_neighbors'],
+                                n_neighbors=min(15, self.config['knn_params']['user_neighbors']),
                                 metric=self.config['knn_params']['metric'],
                                 algorithm=self.config['knn_params']['algorithm'])
             user_knn.fit(train_df)
             self.models['user_knn'] = user_knn
 
-            logger.info("Training Item-based KNN model...")
-            item_knn = KNNModel(type='item',
-                                n_neighbors=self.config['knn_params']['item_neighbors'],
-                                metric=self.config['knn_params']['metric'],
-                                algorithm=self.config['knn_params']['algorithm'])
-            item_knn.fit(train_df)
-            self.models['item_knn'] = item_knn
+            # 3. Create enhanced content-based model (highest priority for sparse data)
+            logger.info("Creating enhanced content-based model...")
+            self.feature_extractor.create_game_embeddings(train_df)
+            content_sim = self.feature_extractor.get_similarity_matrix(self.feature_extractor.game_embeddings)
+            content_model = ContentBasedModel(content_sim)
+            content_model.fit(train_df)  # Use all data for content-based model
 
-            # 3. Train game sequence model (replacing the user sequence model)
-            logger.info("Training game sequence model...")
-            # Create game sequence model optimized for sparse data
-            from models.sequence_model import SequenceRecommender
+            # Set popular items for cold start
+            popular_games = self.get_popular_games(50)  # Get more games for better diversity
+            content_model.popular_items = popular_games
+            self.models['content'] = content_model
+
+            # 4. Create popularity-based model for cold-start scenarios
+            logger.info("Creating popularity-based model...")
+            popularity_model = PopularityModel(
+                time_decay_factor=self.config.get('time_decay_factor', 0.9),
+                diversity_factor=0.4  # Increase diversity factor for better exploration
+            )
+            popularity_model.fit(train_df)
+            self.models['popularity'] = popularity_model
+
+            # 5. Create simplified sequence model
+            logger.info("Creating simplified game sequence model...")
             game_seq_model = SequenceRecommender(
-                hidden_dim=self.config['sequence_params']['hidden_dim'],
-                num_layers=self.config['sequence_params']['num_layers'],
-                dropout=self.config['sequence_params']['dropout'],
+                hidden_dim=64,  # Reduce complexity
+                num_layers=1,  # Single layer for simpler model
+                dropout=0.3,  # Increase dropout for better generalization
                 learning_rate=self.config['sequence_params']['learning_rate'],
                 batch_size=self.config['sequence_params']['batch_size'],
                 epochs=self.config['sequence_params']['epochs'],
                 device=self.device
             )
-            # Pass the DataFrame directly to utilize game-to-game transitions
+            # Pass the DataFrame directly
             game_seq_model.fit(train_df)
             self.models['sequence'] = game_seq_model
 
-            # 4. Create enhanced content-based model
-            logger.info("Creating enhanced content-based model...")
-            self.feature_extractor.create_game_embeddings(train_df)
-            content_sim = self.feature_extractor.get_similarity_matrix(self.feature_extractor.game_embeddings)
-            content_model = ContentBasedModel(content_sim)
-
-            # Use better dataset for content-based model
-            content_model.fit(train_df)
-
-            # Set popular items for cold start
-            popular_games = self.get_popular_games(20)
-            content_model.popular_items = popular_games
-
-            self.models['content'] = content_model
-
-            # 5. Create popularity-based model for extremely sparse data scenarios
-            logger.info("Creating popularity-based model...")
-            popularity_model = PopularityModel(
-                time_decay_factor=self.config.get('time_decay_factor', 0.9),
-                diversity_factor=0.3
-            )
-            popularity_model.fit(train_df)
-            self.models['popularity'] = popularity_model
-
-            # 5. Create hybrid recommender with adjusted weights for sparse data
+            # 6. Create hybrid recommender with weights optimized for sparse data
             if all(model is not None for model in self.models.values()):
-                logger.info("Creating hybrid recommender with optimized weights...")
+                logger.info("Creating hybrid recommender with sparsity-optimized weights...")
 
-                # Adjust weights for sparse data - increase weight for content and item-based models
-                # Reduce weight for user-based models that need rich user history
+                # Heavily weighted toward content and item similarities for sparse data
                 model_weights = {
-                    'user_knn': self.config.get('user_knn_weight', 0.10),  # Further reduced
-                    'item_knn': self.config.get('item_knn_weight', 0.30),  # Keep same
-                    'sequence': self.config.get('sequence_weight', 0.10),  # Reduced
-                    'content': self.config.get('content_weight', 0.50)  # Significantly increased
+                    'user_knn': 0.10,  # Reduce user-based weight (requires rich history)
+                    'item_knn': 0.30,  # Higher weight for item-based (works better with sparse data)
+                    'sequence': 0.10,  # Maintain sequence model for temporal patterns
+                    'content': 0.40,  # Highest weight for content (best for sparse data)
+                    'popularity': 0.10  # Add popularity model for cold-start cases
                 }
 
                 self.hybrid_model = HybridRecommender(self.models, model_weights)
 
-                # 6. Prepare enhanced popular items for cold start
-                popular_games = self.get_popular_games(50)  # Get more for better diversity
+                # Set popular items for cold start
                 self.hybrid_model.popular_items = popular_games
-
-                # 7. Configure hybrid model for better diversity and coverage
-                if hasattr(self.hybrid_model, 'config'):
-                    self.hybrid_model.config = self.config
-                else:
-                    setattr(self.hybrid_model, 'config', self.config)
-
-                # Set diversity settings if not already present
-                if not hasattr(self.hybrid_model, 'diversity_factor'):
-                    self.hybrid_model.diversity_factor = 0.3
 
                 # Enable caching for performance
                 if not hasattr(self.hybrid_model, 'enable_cache'):
                     self.hybrid_model.enable_cache = True
 
-                logger.info("All models trained successfully")
+                # Set diversity factor for better recommendations
+                self.hybrid_model.diversity_factor = 0.4  # Higher diversity for better exploration
+
+                logger.info(f"All models trained successfully with sparsity-optimized weights: {model_weights}")
                 return True
             else:
                 logger.error("Some models failed to train, hybrid model creation skipped")
@@ -266,7 +254,7 @@ class SteamRecommender:
         except Exception as e:
             logger.error(f"Error training models: {str(e)}")
             logger.error(traceback.format_exc())
-            # 确保出错时hybrid_model被设为None
+            # Ensure hybrid_model is set to None on error
             self.hybrid_model = None
             return False
 
@@ -971,21 +959,18 @@ class SteamRecommender:
                 return False
 
             # 1. 设置多样性因子
-            self.hybrid_model.diversity_factor = 0.3  # 0.3 的多样性权重在多样性和相关性之间取得平衡
+            self.hybrid_model.diversity_factor = 0.4  # 0.4 的多样性权重在多样性和相关性之间取得平衡
 
             # 2. 启用缓存以提高性能
             self.hybrid_model.enable_cache = True
 
-            # 3. 增加冷启动策略中的多样性
-            # 已经在 get_cold_start_recommendations 中实现
-
-            # 4. 将配置传递给混合模型以便其能访问全局设置
+            # 3. 将配置传递给混合模型以便其能访问全局设置
             if hasattr(self.hybrid_model, 'config'):
                 self.hybrid_model.config.update(self.config)
             else:
                 setattr(self.hybrid_model, 'config', self.config)
 
-            # 5. 为物品多样性添加相关信息
+            # 4. 为物品多样性添加相关信息
             if hasattr(self.data_processor, 'train_df') and 'tags' in self.data_processor.train_df.columns:
                 # 创建游戏标签字典
                 game_tags = {}
@@ -1752,60 +1737,45 @@ class SteamRecommender:
             logger.error(traceback.format_exc())
 
     def train_with_optimal_parameters(self):
-        """使用找到的最佳参数训练模型
-
-        该方法会先找到最佳参数组合，然后使用这些参数训练一个优化的模型
-
-        Returns:
-            bool: 训练成功返回True，否则返回False
-        """
-        logger.info("使用最佳参数训练模型...")
+        """训练并优化推荐系统，专为极度稀疏数据场景进行优化"""
+        logger.info("Training with optimal parameters for extremely sparse data...")
 
         try:
-            # 找到最佳参数
-            optimal_params = self.find_optimal_k_values()
+            # 1. 修改配置参数以适应极度稀疏数据
+            self.config['knn_params']['user_neighbors'] = 15
+            self.config['knn_params']['item_neighbors'] = 20
+            self.config['knn_params']['metric'] = 'jaccard'
 
-            if not optimal_params:
-                logger.warning("无法找到最佳参数，使用手动调优的参数训练")
-                # 使用手动调优的参数，而不是默认参数
-                optimal_params = {
-                    'user_knn_neighbors': 20,  # 中等大小的邻居数
-                    'item_knn_neighbors': 30,  # 稍大一些的物品邻居
-                    'svd_components': 50,  # 适中的组件数
-                    'best_k': 10  # 标准推荐数量
-                }
+            # 优化序列模型参数
+            self.config['sequence_params']['learning_rate'] = 0.0005
+            self.config['sequence_params']['dropout'] = 0.3
+            self.config['sequence_params']['num_layers'] = 1
+            self.config['sequence_params']['hidden_dim'] = 64
+            self.config['sequence_params']['epochs'] = 15
 
-            # 更新配置
-            self.config['knn_params']['user_neighbors'] = optimal_params['user_knn_neighbors']
-            self.config['knn_params']['item_neighbors'] = optimal_params['item_knn_neighbors']
-            self.config['n_recommendations'] = optimal_params['best_k']
+            # 修改权重
+            self.config['user_knn_weight'] = 0.10
+            self.config['item_knn_weight'] = 0.30
+            self.config['content_weight'] = 0.40
+            self.config['sequence_weight'] = 0.10
+            self.config['popularity_weight'] = 0.10
 
-            # 修改序列模型参数，改善训练问题
-            self.config['sequence_params']['learning_rate'] = 0.0005  # 降低学习率
-            self.config['sequence_params']['dropout'] = 0.3  # 增加dropout
-            self.config['sequence_params']['num_layers'] = 1  # 减少层数
-            self.config['sequence_params']['hidden_dim'] = 64  # 减小隐藏层
-            self.config['sequence_params']['epochs'] = 20  # 增加训练轮数，配合早停
+            # 增加多样性
+            self.config['diversity_factor'] = 0.4
 
-            logger.info(f"使用参数配置: User-KNN={optimal_params['user_knn_neighbors']}, "
-                        f"Item-KNN={optimal_params['item_knn_neighbors']}, "
-                        f"k={optimal_params['best_k']}, "
-                        f"Sequence-LR={self.config['sequence_params']['learning_rate']}")
-
-            # 使用最佳参数训练模型
+            # 2. 训练模型
             success = self.train_models()
 
             if success:
-                logger.info("使用优化参数成功训练模型")
-
-                # 保存最佳参数配置
-                os.makedirs('recommender_model', exist_ok=True)
-                with open(os.path.join('recommender_model', 'optimal_params.json'), 'w') as f:
-                    json.dump(optimal_params, f, indent=2)
-
-            return success
+                # 3. 提高多样性和覆盖率
+                self.improve_diversity_and_coverage()
+                logger.info("Training with optimal parameters completed successfully")
+                return True
+            else:
+                logger.error("Failed to train models with optimal parameters")
+                return False
 
         except Exception as e:
-            logger.error(f"使用最佳参数训练模型时出错: {str(e)}")
+            logger.error(f"Error in training with optimal parameters: {str(e)}")
             logger.error(traceback.format_exc())
-            return self.train_models()  # 出错时退回到标准训练
+            return False
