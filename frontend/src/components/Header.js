@@ -1,24 +1,61 @@
 // frontend/src/components/Header.js
-import React from 'react';
+import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
 
 const Header = () => {
-  return (
-    <header className="bg-gray-800 text-white">
-      <div className="container mx-auto px-4 py-4 flex flex-wrap items-center justify-between">
-        <div className="flex items-center">
-          <Link to="/" className="font-bold text-xl">Steam Game Recommender</Link>
-        </div>
+  const [menuOpen, setMenuOpen] = useState(false);
 
-        <nav className="flex items-center">
-          <ul className="flex space-x-6">
-            <li>
-              <Link to="/" className="hover:text-gray-300">Home</Link>
-            </li>
-            <li>
-              <Link to="/games" className="hover:text-gray-300">Browse Games</Link>
-            </li>
-          </ul>
+  const headerStyle = {
+    backgroundColor: '#1f2937',
+    color: 'white',
+    padding: '1rem 0',
+  };
+
+  const containerStyle = {
+    maxWidth: '1200px',
+    margin: '0 auto',
+    padding: '0 1rem',
+  };
+
+  const navStyle = {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  };
+
+  const logoStyle = {
+    fontWeight: 'bold',
+    fontSize: '1.25rem',
+    color: 'white',
+    textDecoration: 'none',
+  };
+
+  const menuStyle = {
+    display: 'flex',
+    gap: '1.5rem',
+  };
+
+  const linkStyle = {
+    color: 'white',
+    textDecoration: 'none',
+  };
+
+  return (
+    <header style={headerStyle}>
+      <div style={containerStyle}>
+        <nav style={navStyle}>
+          <Link to="/" style={logoStyle}>
+            Steam Game Recommender
+          </Link>
+
+          <div style={menuStyle}>
+            <Link to="/" style={linkStyle}>
+              Home
+            </Link>
+            <Link to="/games" style={linkStyle}>
+              Browse Games
+            </Link>
+          </div>
         </nav>
       </div>
     </header>
