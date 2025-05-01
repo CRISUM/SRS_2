@@ -82,62 +82,18 @@ class KNNModel(BaseRecommenderModel):
                 columns=item_ids.cat.categories)
 
         # 初始化和训练模型
-        if self.metric == 'jaccard':
-            from sklearn.metrics import jaccard_score
-
-            # 自定义Jaccard相似度函数
-            def jaccard_similarity(x, y):
-                # 转换为二进制向量 (非零值视为1)
-                x_bin = x > 0
-                y_bin = y > 0
-
-                # 计算交集和并集大小
-                intersection = np.logical_and(x_bin, y_bin).sum()
-                union = np.logical_or(x_bin, y_bin).sum()
-
-                # 返回Jaccard相似度
-                return intersection / union if union > 0 else 0
-
-            self.model = NearestNeighbors(n_neighbors=self.n_neighbors,
-                                          metric='precomputed',
-                                          algorithm='brute')
-
-            # 为KNN模型创建相似度矩阵
-            if self.type == 'user':
-                n_samples = self.sparse_matrix.shape[0]
-                sim_matrix = np.zeros((n_samples, n_samples))
-
-                for i in range(n_samples):
-                    for j in range(i + 1, n_samples):
-                        sim = jaccard_similarity(self.sparse_matrix[i].toarray().flatten(),
-                                                 self.sparse_matrix[j].toarray().flatten())
-                        sim_matrix[i, j] = sim
-                        sim_matrix[j, i] = sim  # 对称矩阵
-
-                self.model.fit(sim_matrix)
-            else:  # item-based
-                n_samples = self.sparse_matrix.shape[1]
-                sim_matrix = np.zeros((n_samples, n_samples))
-
-                for i in range(n_samples):
-                    for j in range(i + 1, n_samples):
-                        sim = jaccard_similarity(self.sparse_matrix[:, i].toarray().flatten(),
-                                                 self.sparse_matrix[:, j].toarray().flatten())
-                        sim_matrix[i, j] = sim
-                        sim_matrix[j, i] = sim  # 对称矩阵
-
-                self.model.fit(sim_matrix)
-        else:
-            # 原始代码逻辑，使用指定的metric
-            self.model = NearestNeighbors(n_neighbors=self.n_neighbors,
+        if self.type == 'user':
+            n_neighbors = min(self.n_neighbors, len(self.user_indices))
+            self.model = NearestNeighbors(n_neighbors=n_neighbors,
                                           metric=self.metric,
                                           algorithm=self.algorithm)
-
-            if self.type == 'user':
-                self.model.fit(self.sparse_matrix)
-            else:
-                self.model.fit(self.sparse_matrix.T)
-
+            self.model.fit(self.sparse_matrix)
+        else:
+            n_neighbors = min(self.n_neighbors, len(self.item_indices))
+            self.model = NearestNeighbors(n_neighbors=n_neighbors,
+                                          metric=self.metric,
+                                          algorithm=self.algorithm)
+            self.model.fit(self.sparse_matrix.T)
 
         logger.info(f"{self.type}-based KNN model trained successfully")
         return self

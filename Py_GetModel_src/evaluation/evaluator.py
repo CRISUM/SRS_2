@@ -30,11 +30,9 @@ class RecommenderEvaluator:
         self.k_values = k_values or [5, 10, 20]
         self.results = None
 
-    # 在Py_GetModel_src/evaluation/evaluator.py中
-
     def evaluate(self, model, test_df, test_users=None, k_values=None):
-        """Evaluate model performance with improved user selection for sparse data"""
-        logger.info("Starting model evaluation with sparse data optimization...")
+        """Evaluate model performance"""
+        logger.info("Starting model evaluation...")
 
         try:
             # 使用提供的k值或默认值
@@ -48,49 +46,27 @@ class RecommenderEvaluator:
             # 记录测试数据信息
             logger.info(f"Test DataFrame has {len(test_df)} rows and {test_df['user_id'].nunique()} unique users")
 
-            # 改进的测试用户选择方法
+            # 简单直接的测试用户选择方法
             if test_users is None:
-                # 选择可能的测试用户：有任何交互记录的用户
-                all_possible_users = test_df['user_id'].unique()
-                logger.info(f"Found {len(all_possible_users)} potential test users")
+                # 获取所有有推荐项目的用户
+                users_with_recommendations = test_df[test_df['is_recommended'] == True]['user_id'].unique()
+                logger.info(f"Found {len(users_with_recommendations)} users with recommended items")
 
-                # 首先尝试选择有正向交互的用户
-                if 'is_recommended' in test_df.columns:
-                    users_with_recommendations = test_df[test_df['is_recommended'] == True]['user_id'].unique()
-                    logger.info(f"Found {len(users_with_recommendations)} users with recommended items")
-
-                    # 如果有足够的用户，优先选择有推荐的用户
-                    if len(users_with_recommendations) > 10:
-                        sample_size = min(100, len(users_with_recommendations))
-                        test_users = np.random.choice(users_with_recommendations, sample_size, replace=False)
-                        logger.info(f"Selected {len(test_users)} test users with recommended items")
-                    else:
-                        # 加入部分没有推荐的用户以增加多样性
-                        users_without_recommendations = np.setdiff1d(all_possible_users, users_with_recommendations)
-
-                        # 确定用户选择比例
-                        with_rec_count = min(len(users_with_recommendations), 50)
-                        without_rec_count = min(100 - with_rec_count, len(users_without_recommendations))
-
-                        # 合并两组用户
-                        with_rec_users = np.random.choice(users_with_recommendations, with_rec_count,
-                                                          replace=False) if with_rec_count > 0 else []
-                        without_rec_users = np.random.choice(users_without_recommendations, without_rec_count,
-                                                             replace=False) if without_rec_count > 0 else []
-
-                        test_users = np.concatenate([with_rec_users, without_rec_users])
-                        logger.info(
-                            f"Selected mixed user set: {with_rec_count} with recommendations, {without_rec_count} without")
+                # 如果用户数量足够，随机选择100个用户
+                if len(users_with_recommendations) > 0:
+                    sample_size = min(100, len(users_with_recommendations))
+                    test_users = np.random.choice(users_with_recommendations, sample_size, replace=False)
+                    logger.info(f"Selected {len(test_users)} test users randomly from users with recommendations")
                 else:
-                    # 如果没有推荐字段，随机选择用户
-                    sample_size = min(100, len(all_possible_users))
-                    test_users = np.random.choice(all_possible_users, sample_size, replace=False)
-                    logger.info(f"Selected {len(test_users)} random test users")
+                    # 如果没有推荐用户，则随机选择一些用户
+                    logger.warning("No users with recommendations found, selecting random users")
+                    all_users = test_df['user_id'].unique()
+                    sample_size = min(100, len(all_users))
+                    test_users = np.random.choice(all_users, sample_size, replace=False) if len(all_users) > 0 else []
 
-            # 确保我们有用户可以评估
-            if len(test_users) == 0:
-                logger.error("No users available for testing")
-                return None
+                    if len(test_users) == 0:
+                        logger.error("No users available for testing")
+                        return None
 
             logger.info(f"Evaluating model with {len(test_users)} test users")
 
@@ -212,11 +188,8 @@ class RecommenderEvaluator:
             logger.error(traceback.format_exc())
             return None
 
-    # 在Py_GetModel_src/evaluation/evaluator.py中
-    # 修改calculate_precision_recall方法
-
     def calculate_precision_recall(self, true_items, pred_items, k):
-        """Calculate precision and recall at k with better sparse data handling
+        """Calculate precision and recall at k
 
         Args:
             true_items (set): Set of relevant items
@@ -226,42 +199,19 @@ class RecommenderEvaluator:
         Returns:
             tuple: (precision, recall)
         """
-        # 确保输入是集合或可以转换为集合的对象
-        if not true_items:
-            true_items = set()  # 确保是空集而非None
-        else:
-            true_items = set(true_items)  # 转换为集合
+        # Count hits (items that are both recommended and relevant)
+        n_hits = len(set(pred_items) & true_items)
 
-        if not pred_items:
-            pred_items = []  # 确保是空列表而非None
+        # Calculate precision
+        precision = n_hits / k if k > 0 else 0
 
-        # 实际使用的k值是max(len(pred_items), k)
-        actual_k = min(len(pred_items), k)
-
-        # 如果没有推荐，返回0
-        if actual_k == 0:
-            return 0, 0
-
-        # 只考虑前k个推荐
-        top_k_items = pred_items[:actual_k]
-
-        # 计算命中数量
-        n_hits = len(set(top_k_items) & true_items)
-
-        # 计算precision
-        precision = n_hits / actual_k if actual_k > 0 else 0
-
-        # 计算recall
+        # Calculate recall
         recall = n_hits / len(true_items) if len(true_items) > 0 else 0
 
         return precision, recall
 
-
-    # In Py_GetModel_src/evaluation/evaluator.py
-    # Modify the calculate_ndcg method to better handle sparse data:
-
     def calculate_ndcg(self, true_items, pred_items, k):
-        """Calculate NDCG at k with better handling of sparse data
+        """Calculate NDCG at k
 
         Args:
             true_items (set): Set of relevant items
@@ -282,19 +232,18 @@ class RecommenderEvaluator:
         ideal_relevance = np.zeros_like(relevance)
         ideal_relevance[:min(len(true_items), k)] = 1
 
-        # Calculate DCG and IDCG manually to handle sparse data better
-        dcg = 0
-        idcg = 0
+        # Calculate NDCG
+        try:
+            return ndcg_score([ideal_relevance], [relevance])
+        except:
+            # Manually calculate NDCG if sklearn version fails
+            # DCG = sum(rel_i / log2(i+1)) for i from 1 to k
+            dcg = sum(rel / np.log2(i + 2) for i, rel in enumerate(relevance))
 
-        for i, rel in enumerate(relevance):
-            # Use log2(i+2) to avoid division by zero when i=0
-            dcg += rel / np.log2(i + 2)
+            # IDCG = sum(rel_i / log2(i+1)) for i from 1 to k (sorted)
+            idcg = sum(rel / np.log2(i + 2) for i, rel in enumerate(sorted(relevance, reverse=True)))
 
-        for i, rel in enumerate(sorted(relevance, reverse=True)):
-            idcg += rel / np.log2(i + 2)
-
-        # Return NDCG, handling division by zero
-        return dcg / idcg if idcg > 0 else 0
+            return dcg / idcg if idcg > 0 else 0
 
     def calculate_diversity(self, pred_items, data_df, k):
         """Calculate diversity at k
