@@ -1,4 +1,4 @@
-// frontend/src/components/Home.js - Fixed API calls
+// frontend/src/components/Home.js
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import axios from 'axios';
@@ -21,6 +21,7 @@ const Home = () => {
     };
   });
   const [showRecommendations, setShowRecommendations] = useState(false);
+  const [isSearching, setIsSearching] = useState(false);
 
   // Load random games
   useEffect(() => {
@@ -32,10 +33,21 @@ const Home = () => {
     localStorage.setItem('userGameActions', JSON.stringify(userActions));
   }, [userActions]);
 
+  // Add debounce for search
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (searchTerm) {
+        handleSearch();
+      }
+    }, 500);
+
+    return () => clearTimeout(timer);
+  }, [searchTerm]);
+
   const fetchRandomGames = async () => {
     setLoading(true);
     try {
-      // Fetch games from the games API - FIXED path
+      // Fetch games from the games API
       const response = await axios.get('/api/games?limit=20');
       setRandomGames(response.data.games || []);
     } catch (error) {
@@ -52,12 +64,15 @@ const Home = () => {
       return;
     }
 
+    setIsSearching(true);
     try {
       const response = await axios.get(`/api/games?search=${encodeURIComponent(searchTerm)}`);
       setSearchResults(response.data.games || []);
     } catch (error) {
       console.error('Error searching games:', error);
       toast.error('Search failed. Please try again.');
+    } finally {
+      setIsSearching(false);
     }
   };
 
@@ -144,47 +159,61 @@ const Home = () => {
 
   // Determine which games to display
   const displayGames = searchTerm ? searchResults : randomGames;
+  const hasUserActions = userActions.liked.length > 0 ||
+                        userActions.purchased.length > 0 ||
+                        userActions.recommended.length > 0;
 
   return (
     <div className="home">
-      {/* Search bar */}
-      <div className="mb-6 flex gap-2">
-        <input
-          type="text"
-          placeholder="Search games..."
-          className="flex-1 px-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-          value={searchTerm}
-          onChange={(e) => setSearchTerm(e.target.value)}
-          onKeyPress={(e) => e.key === 'Enter' && handleSearch()}
-        />
-        <button
-          onClick={handleSearch}
-          className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md"
-        >
-          Search
-        </button>
+      {/* Hero section */}
+      <div className="bg-gradient-to-r from-blue-800 to-purple-800 rounded-lg p-8 mb-8 text-white">
+        <h1 className="text-3xl md:text-4xl font-bold mb-4">Welcome to Steam Game Recommender</h1>
+        <p className="text-lg opacity-90 mb-6">Discover new games based on your preferences and playing history.</p>
+
+        {/* Search bar */}
+        <div className="max-w-2xl">
+          <div className="flex flex-col md:flex-row gap-2">
+            <input
+              type="text"
+              placeholder="Search games..."
+              className="flex-1 px-4 py-3 rounded-md text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 w-full"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+            />
+            <button
+              onClick={handleSearch}
+              className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-3 rounded-md md:w-auto w-full"
+            >
+              Search
+            </button>
+          </div>
+        </div>
       </div>
 
       {/* User action counts and action buttons */}
-      <div className="bg-white rounded-lg shadow-md p-4 mb-6">
-        <div className="flex flex-wrap items-center justify-between">
-          <div className="flex space-x-4 mb-2 md:mb-0">
-            <span className="bg-red-100 text-red-800 px-3 py-1 rounded-full">
-              ❤️ {userActions.liked.length} Liked
+      <div className="bg-white rounded-lg shadow-md p-6 mb-8">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div className="flex flex-wrap gap-3">
+            <span className="bg-red-100 text-red-800 px-3 py-1 rounded-full flex items-center">
+              <span className="mr-1">❤️</span> {userActions.liked.length} Liked
             </span>
-            <span className="bg-green-100 text-green-800 px-3 py-1 rounded-full">
-              🛒 {userActions.purchased.length} Purchased
+            <span className="bg-green-100 text-green-800 px-3 py-1 rounded-full flex items-center">
+              <span className="mr-1">🛒</span> {userActions.purchased.length} Purchased
             </span>
-            <span className="bg-blue-100 text-blue-800 px-3 py-1 rounded-full">
-              👍 {userActions.recommended.length} Recommended
+            <span className="bg-blue-100 text-blue-800 px-3 py-1 rounded-full flex items-center">
+              <span className="mr-1">👍</span> {userActions.recommended.length} Recommended
             </span>
           </div>
 
-          <div className="flex space-x-2">
+          <div className="flex flex-col sm:flex-row gap-2">
             <button
               onClick={getRecommendations}
-              className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-md"
-              disabled={loading || (userActions.liked.length === 0 && userActions.purchased.length === 0 && userActions.recommended.length === 0)}
+              className={`px-4 py-2 rounded-md flex-1 ${
+                hasUserActions
+                  ? 'bg-purple-600 hover:bg-purple-700 text-white'
+                  : 'bg-purple-300 text-white cursor-not-allowed'
+              }`}
+              disabled={loading || !hasUserActions}
             >
               {loading ? 'Loading...' : 'Get Recommendations'}
             </button>
@@ -223,7 +252,8 @@ const Home = () => {
           {searchTerm ? 'Search Results' : 'Discover Games'}
         </h2>
 
-        {loading && displayGames.length === 0 ? (
+        {/* Loading state */}
+        {(loading || (isSearching && searchTerm)) && !displayGames.length ? (
           <div className="flex justify-center items-center h-64">
             <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-600"></div>
           </div>

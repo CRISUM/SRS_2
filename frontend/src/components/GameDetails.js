@@ -1,4 +1,4 @@
-// frontend/src/components/GameDetails.js - Fixed API calls
+// frontend/src/components/GameDetails.js
 import React, { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import axios from 'axios';
@@ -37,7 +37,12 @@ const GameDetails = () => {
           axios.get(`/api/similar-games/${gameId}?count=4`)
         ]);
 
-        setGame(gameResponse.data.game);
+        if (gameResponse.data.status === 'success') {
+          setGame(gameResponse.data.game);
+        } else {
+          toast.error('Failed to load game details');
+        }
+
         setSimilarGames(similarGamesResponse.data.similar_games || []);
       } catch (error) {
         console.error('Error fetching game data:', error);
@@ -120,6 +125,11 @@ const GameDetails = () => {
       <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4" role="alert">
         <strong className="font-bold">Error:</strong>
         <span className="block sm:inline"> Game not found or an error occurred.</span>
+        <div className="mt-4">
+          <Link to="/games" className="text-blue-600 hover:text-blue-800">
+            &larr; Return to Games
+          </Link>
+        </div>
       </div>
     );
   }
@@ -127,8 +137,11 @@ const GameDetails = () => {
   return (
     <div className="game-details">
       <div className="mb-4">
-        <Link to="/games" className="text-blue-600 hover:text-blue-800">
-          &larr; Back to Games
+        <Link to="/games" className="text-blue-600 hover:text-blue-800 flex items-center">
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-1" viewBox="0 0 20 20" fill="currentColor">
+            <path fillRule="evenodd" d="M9.707 16.707a1 1 0 01-1.414 0l-6-6a1 1 0 010-1.414l6-6a1 1 0 011.414 1.414L5.414 9H17a1 1 0 110 2H5.414l4.293 4.293a1 1 0 010 1.414z" clipRule="evenodd" />
+          </svg>
+          Back to Games
         </Link>
       </div>
 
@@ -141,20 +154,36 @@ const GameDetails = () => {
             className="w-full h-full object-cover"
             onError={(e) => {
               e.target.onerror = null;
-              e.target.src = "https://via.placeholder.com/1200x400?text=Game+Image";
+              e.target.src = `data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1200' height='400' viewBox='0 0 1200 400'%3E%3Crect width='1200' height='400' fill='%23444444'/%3E%3Ctext x='50%25' y='50%25' font-family='Arial' font-size='40' text-anchor='middle' fill='%23cccccc' dominant-baseline='middle'%3E${encodeURIComponent(game.title || "Game Image")}%3C/text%3E%3C/svg%3E`;
             }}
           />
+
+          {/* Price tag overlay */}
+          {game.price_final !== undefined && (
+            <div className="absolute top-4 right-4 bg-black bg-opacity-75 text-white px-4 py-2 rounded-md font-bold">
+              {game.price_final === 0 ? "Free to Play" : `$${game.price_final.toFixed(2)}`}
+              {game.price_original > game.price_final && (
+                <span className="ml-2 text-gray-400 line-through text-sm">${game.price_original.toFixed(2)}</span>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="p-6">
-          <div className="flex flex-wrap justify-between items-start">
-            <div className="mb-4 md:mb-0">
+          <div className="flex flex-wrap justify-between items-start gap-4">
+            <div className="mb-4 md:mb-0 flex-grow">
               <h1 className="text-3xl font-bold mb-2">{game.title}</h1>
+
+              {game.date_release && (
+                <p className="text-gray-600 mb-2">
+                  Released: {new Date(game.date_release).toLocaleDateString()}
+                </p>
+              )}
 
               {game.tags && game.tags.length > 0 && (
                 <div className="flex flex-wrap gap-2 mb-4">
                   {game.tags.map((tag, index) => (
-                    <span key={index} className="bg-gray-200 text-gray-700 px-2 py-1 rounded">
+                    <span key={index} className="bg-gray-200 text-gray-700 px-2 py-1 rounded text-sm">
                       {tag}
                     </span>
                   ))}
@@ -162,10 +191,10 @@ const GameDetails = () => {
               )}
             </div>
 
-            <div className="flex space-x-2">
+            <div className="flex flex-col sm:flex-row gap-2">
               <button
                 onClick={() => handleGameAction(gameId, isLiked ? 'unlike' : 'like')}
-                className={`flex items-center space-x-1 px-4 py-2 rounded-md ${
+                className={`flex items-center justify-center space-x-1 px-4 py-2 rounded-md ${
                   isLiked 
                     ? 'bg-red-600 text-white' 
                     : 'bg-gray-200 hover:bg-gray-300 text-gray-800'
@@ -179,7 +208,7 @@ const GameDetails = () => {
 
               <button
                 onClick={() => handleGameAction(gameId, isPurchased ? 'unbuy' : 'buy')}
-                className={`flex items-center space-x-1 px-4 py-2 rounded-md ${
+                className={`flex items-center justify-center space-x-1 px-4 py-2 rounded-md ${
                   isPurchased 
                     ? 'bg-green-600 text-white' 
                     : 'bg-gray-200 hover:bg-gray-300 text-gray-800'
@@ -193,7 +222,7 @@ const GameDetails = () => {
 
               <button
                 onClick={() => handleGameAction(gameId, isRecommended ? 'unrecommend' : 'recommend')}
-                className={`flex items-center space-x-1 px-4 py-2 rounded-md ${
+                className={`flex items-center justify-center space-x-1 px-4 py-2 rounded-md ${
                   isRecommended 
                     ? 'bg-blue-600 text-white' 
                     : 'bg-gray-200 hover:bg-gray-300 text-gray-800'
@@ -207,47 +236,63 @@ const GameDetails = () => {
             </div>
           </div>
 
-          {/* Game metadata */}
-          <div className="mt-6 text-gray-600">
-            {game.date_release && (
-              <p className="mb-2">
-                <strong>Release Date:</strong> {new Date(game.date_release).toLocaleDateString()}
-              </p>
-            )}
+          {/* Game stats */}
+          {game.positive_ratio !== undefined && (
+            <div className="mt-6 p-4 bg-gray-100 rounded-md">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                {game.positive_ratio !== undefined && (
+                  <div className="text-center">
+                    <div className="text-2xl font-bold text-blue-600">{(game.positive_ratio * 100).toFixed(0)}%</div>
+                    <div className="text-sm text-gray-600">Positive Reviews</div>
+                  </div>
+                )}
 
-            {game.price_final !== undefined && (
-              <p className="mb-2">
-                <strong>Price:</strong> {game.price_final === 0 ? "Free to Play" : `$${game.price_final.toFixed(2)}`}
-              </p>
-            )}
+                {game.rating !== undefined && (
+                  <div className="text-center">
+                    <div className="text-2xl font-bold text-blue-600">{game.rating.toFixed(1)}</div>
+                    <div className="text-sm text-gray-600">Rating</div>
+                  </div>
+                )}
 
-            {game.positive_ratio !== undefined && (
-              <p className="mb-2">
-                <strong>Positive Ratio:</strong> {(game.positive_ratio * 100).toFixed(0)}%
-              </p>
-            )}
-
-            {/* Description */}
-            {game.description && (
-              <div className="mt-4 mb-6">
-                <h3 className="text-lg font-semibold mb-2">About</h3>
-                <p className="text-gray-700">{game.description}</p>
+                <div className="text-center col-span-1 sm:col-span-2">
+                  <div className="flex justify-center space-x-4">
+                    {game.win && (
+                      <span className="bg-blue-100 text-blue-800 px-3 py-1 rounded-full flex items-center">
+                        <svg className="h-4 w-4 mr-1" fill="currentColor" viewBox="0 0 20 20">
+                          <path d="M4 3h12v2H4V3zm0 4h12v2H4V7zm0 4h12v2H4v-2zm0 4h12v2H4v-2z"/>
+                        </svg>
+                        Windows
+                      </span>
+                    )}
+                    {game.mac && (
+                      <span className="bg-gray-100 text-gray-800 px-3 py-1 rounded-full flex items-center">
+                        <svg className="h-4 w-4 mr-1" fill="currentColor" viewBox="0 0 20 20">
+                          <path d="M17.25 13.25v-10a.5.5 0 00-.5-.5h-7.5a.5.5 0 00-.5.5v10h-1.5v-10a.5.5 0 00-.5-.5h-5.5a.5.5 0 00-.5.5v10H.25v1.5h19.5v-1.5h-.5zm-9.5 0v-9h1.5v9h-1.5zm-7 0v-9h1.5v9h-1.5z"/>
+                        </svg>
+                        Mac
+                      </span>
+                    )}
+                    {game.linux && (
+                      <span className="bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full flex items-center">
+                        <svg className="h-4 w-4 mr-1" fill="currentColor" viewBox="0 0 20 20">
+                          <path d="M10 .5c-5.247 0-9.5 4.253-9.5 9.5S4.753 19.5 10 19.5s9.5-4.253 9.5-9.5S15.247.5 10 .5zm0 17.5c-4.418 0-8-3.582-8-8s3.582-8 8-8 8 3.582 8 8-3.582 8-8 8z"/>
+                        </svg>
+                        Linux
+                      </span>
+                    )}
+                  </div>
+                </div>
               </div>
-            )}
-
-            {/* Platform compatibility */}
-            <div className="flex space-x-2 mt-4">
-              {game.win && (
-                <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded text-sm">Windows</span>
-              )}
-              {game.mac && (
-                <span className="bg-gray-100 text-gray-800 px-2 py-1 rounded text-sm">Mac</span>
-              )}
-              {game.linux && (
-                <span className="bg-yellow-100 text-yellow-800 px-2 py-1 rounded text-sm">Linux</span>
-              )}
             </div>
-          </div>
+          )}
+
+          {/* Description */}
+          {game.description && (
+            <div className="mt-6">
+              <h3 className="text-xl font-semibold mb-3">About This Game</h3>
+              <p className="text-gray-700 leading-relaxed">{game.description}</p>
+            </div>
+          )}
         </div>
       </div>
 
