@@ -311,14 +311,20 @@ const Home = () => {
             <p>No games found. Try a different search term or refresh the page.</p>
           </div>
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))',
+            gap: '1.5rem',
+            marginBottom: '2rem'
+          }}>
             {displayGames.map(game => (
-              <GameCard
-                key={game.id}
-                game={game}
-                onAction={handleGameAction}
-                userActions={userActions}
-              />
+              <div key={game.app_id} style={{ height: '100%' }}>
+                <GameCard
+                  game={game}
+                  onAction={handleGameAction}
+                  userActions={userActions}
+                />
+              </div>
             ))}
           </div>
         )}

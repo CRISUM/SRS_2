@@ -63,27 +63,23 @@ const GameCard = ({ game, onAction, userActions, showScore }) => {
     borderRadius: '0.5rem',
     boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06)',
     overflow: 'hidden',
-    transition: 'transform 0.2s, box-shadow 0.3s',
+    transition: 'box-shadow 0.3s',
     display: 'flex',
     flexDirection: 'column',
-    height: '100%',
-    ":hover": {
-      transform: 'translateY(-4px)',
-      boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)'
-    }
+    height: '100%'
   };
 
   const imageContainerStyle = {
-    height: '160px',
-    backgroundColor: '#1f2937', // Darker background for placeholder (Steam dark theme color)
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    overflow: 'hidden',
-    position: 'relative'
+    position: 'relative',
+    paddingTop: '56.25%', // 16:9 宽高比
+    backgroundColor: '#1f2937',
+    overflow: 'hidden'
   };
 
   const imageStyle = {
+    position: 'absolute',
+    top: 0,
+    left: 0,
     width: '100%',
     height: '100%',
     objectFit: 'cover',
@@ -224,50 +220,57 @@ const GameCard = ({ game, onAction, userActions, showScore }) => {
 
   return (
     <div style={cardStyle}>
-      <Link to={`/games/${game.id}`} style={{ textDecoration: 'none' }}>
-        <div style={imageContainerStyle}>
-          {/* Show cloud gaming badge if applicable */}
-          {game.cloud_gaming && (
-            <div style={cloudGamingStyle}>
-              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"></path>
-              </svg>
-              Cloud
-            </div>
-          )}
-
-          {/* Show loader while image is loading */}
-          {!imageLoaded && !imageFailed && (
-            <div style={loaderStyle}>
-              <div style={{ width: '30px', height: '30px', borderRadius: '50%', border: '3px solid #66c0f4', borderTopColor: 'transparent', animation: 'spin 1s linear infinite' }}></div>
-            </div>
-          )}
-
-          {/* Show image or placeholder */}
-          {imageFailed ? (
-            <div
-              style={{
-                width: '100%',
-                height: '100%',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                backgroundImage: `url(${generatePlaceholder()})`,
-                backgroundSize: 'cover',
-                backgroundPosition: 'center'
-              }}
-            />
-          ) : (
-            <img
-              src={imageSources[currentImageIndex]}
-              alt={game.title}
-              style={{...imageStyle, opacity: imageLoaded ? 1 : 0}}
-              onLoad={() => setImageLoaded(true)}
-              onError={handleImageError}
-            />
-          )}
+<Link to={`/games/${game.app_id}`} style={{ textDecoration: 'none' }}>
+    <div style={imageContainerStyle}>
+      {/* Steam Deck 兼容标签 */}
+      {game.steam_deck && (
+        <div style={{
+          position: 'absolute',
+          top: '8px',
+          left: '8px',
+          backgroundColor: 'rgba(0,0,0,0.7)',
+          color: 'white',
+          fontSize: '0.75rem',
+          padding: '0.25rem 0.5rem',
+          borderRadius: '0.25rem',
+          zIndex: 2,
+          display: 'flex',
+          alignItems: 'center',
+          gap: '0.25rem'
+        }}>
+          <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"></path>
+          </svg>
+          Steam Deck
         </div>
-      </Link>
+      )}
+
+      {/* 图片 */}
+      {imageFailed ? (
+        <div style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          width: '100%',
+          height: '100%',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          backgroundImage: `url(${generatePlaceholder()})`,
+          backgroundSize: 'cover',
+          backgroundPosition: 'center'
+        }}/>
+      ) : (
+        <img
+          src={imageSources[currentImageIndex]}
+          alt={game.title}
+          style={{...imageStyle, opacity: imageLoaded ? 1 : 0}}
+          onLoad={() => setImageLoaded(true)}
+          onError={handleImageError}
+        />
+      )}
+    </div>
+  </Link>
 
       <div style={contentStyle}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
