@@ -163,70 +163,119 @@ const Home = () => {
                         userActions.purchased.length > 0 ||
                         userActions.recommended.length > 0;
 
+  const heroSection = {
+    background: 'linear-gradient(to right, #1f2937, #374151)',
+    borderRadius: '0.5rem',
+    padding: '2rem',
+    marginBottom: '2rem',
+    color: 'white', // 保持文字为白色
+    boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)'
+  };
+
+  const primaryButtonStyle = {
+    backgroundColor: '#2563eb',
+    color: 'white',
+    padding: '0.75rem 1.5rem',
+    borderRadius: '0.375rem',
+    border: 'none',
+    fontWeight: '600',
+    cursor: 'pointer',
+    transition: 'background-color 0.2s',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06)'
+  };
+
+  const secondaryButtonStyle = {
+    backgroundColor: '#4b5563',
+    color: 'white',
+    padding: '0.75rem 1.5rem',
+    borderRadius: '0.375rem',
+    border: 'none',
+    fontWeight: '600',
+    cursor: 'pointer',
+    transition: 'background-color 0.2s',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06)'
+  };
+
+  const userActionsPanel = {
+    backgroundColor: 'white',
+    borderRadius: '0.5rem',
+    boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06)',
+    padding: '1.5rem',
+    marginBottom: '2rem',
+    color: '#1f2937' // 深灰色文本
+  };
+
   return (
     <div className="home">
-      {/* Hero section */}
-      <div className="bg-gradient-to-r from-blue-800 to-purple-800 rounded-lg p-8 mb-8 text-white">
-        <h1 className="text-3xl md:text-4xl font-bold mb-4">Welcome to Steam Game Recommender</h1>
-        <p className="text-lg opacity-90 mb-6">Discover new games based on your preferences and playing history.</p>
+      {/* Hero section - 保持白色文字在深色背景上 */}
+      <div style={heroSection}>
+          <h1 className="text-3xl md:text-4xl font-bold mb-4">Welcome to Steam Game Recommender</h1>
+          <p className="text-lg opacity-90 mb-6">Discover new games based on your preferences and playing history.</p>
 
-        {/* Search bar */}
-        <div className="max-w-2xl">
-          <div className="flex flex-col md:flex-row gap-2">
-            <input
-              type="text"
-              placeholder="Search games..."
-              className="flex-1 px-4 py-3 rounded-md text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 w-full"
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-            />
-            <button
-              onClick={handleSearch}
-              className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-3 rounded-md md:w-auto w-full"
-            >
-              Search
-            </button>
+          {/* 搜索栏 */}
+          <div className="max-w-2xl">
+            <div className="flex flex-col md:flex-row gap-2">
+              <input
+                type="text"
+                placeholder="Search games..."
+                className="flex-1 px-4 py-3 rounded-md text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 w-full"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+              />
+              <button
+                onClick={handleSearch}
+                style={primaryButtonStyle}
+                className="md:w-auto w-full"
+              >
+                Search
+              </button>
+            </div>
           </div>
         </div>
-      </div>
 
-      {/* User action counts and action buttons */}
-      <div className="bg-white rounded-lg shadow-md p-6 mb-8">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-          <div className="flex flex-wrap gap-3">
-            <span className="bg-red-100 text-red-800 px-3 py-1 rounded-full flex items-center">
-              <span className="mr-1">❤️</span> {userActions.liked.length} Liked
-            </span>
-            <span className="bg-green-100 text-green-800 px-3 py-1 rounded-full flex items-center">
-              <span className="mr-1">🛒</span> {userActions.purchased.length} Purchased
-            </span>
-            <span className="bg-blue-100 text-blue-800 px-3 py-1 rounded-full flex items-center">
-              <span className="mr-1">👍</span> {userActions.recommended.length} Recommended
-            </span>
-          </div>
+    {/* 用户操作面板 - 深色文字在浅色背景上 */}
+    <div style={userActionsPanel}>
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div className="flex flex-wrap gap-3">
+          <span className="bg-red-100 text-red-800 px-3 py-1 rounded-full flex items-center">
+            <span className="mr-1">❤️</span> {userActions.liked.length} Liked
+          </span>
+          <span className="bg-green-100 text-green-800 px-3 py-1 rounded-full flex items-center">
+            <span className="mr-1">🛒</span> {userActions.purchased.length} Purchased
+          </span>
+          <span className="bg-blue-100 text-blue-800 px-3 py-1 rounded-full flex items-center">
+            <span className="mr-1">👍</span> {userActions.recommended.length} Recommended
+          </span>
+        </div>
 
-          <div className="flex flex-col sm:flex-row gap-2">
-            <button
-              onClick={getRecommendations}
-              className={`px-4 py-2 rounded-md flex-1 ${
-                hasUserActions
-                  ? 'bg-purple-600 hover:bg-purple-700 text-white'
-                  : 'bg-purple-300 text-white cursor-not-allowed'
-              }`}
-              disabled={loading || !hasUserActions}
-            >
-              {loading ? 'Loading...' : 'Get Recommendations'}
-            </button>
+        <div className="flex flex-col sm:flex-row gap-2">
+          <button
+            onClick={getRecommendations}
+            style={{
+              ...primaryButtonStyle,
+              opacity: hasUserActions ? 1 : 0.5,
+              cursor: hasUserActions ? 'pointer' : 'not-allowed'
+            }}
+            disabled={loading || !hasUserActions}
+          >
+            {loading ? 'Loading...' : 'Get Recommendations'}
+          </button>
 
-            <button
-              onClick={resetActions}
-              className="bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded-md"
-            >
-              Reset Preferences
-            </button>
-          </div>
+          <button
+            onClick={resetActions}
+            style={secondaryButtonStyle}
+          >
+            Reset Preferences
+          </button>
         </div>
       </div>
+    </div>
 
       {/* Recommendations area */}
       {showRecommendations && recommendations.length > 0 && (

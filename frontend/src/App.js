@@ -3,11 +3,13 @@ import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
 import axios from 'axios';
 import { ToastContainer, toast } from 'react-toastify';
+import 'react-toastify/dist/ReactToastify.css';
 // Components import
 import Header from './components/Header';
 import Home from './components/Home';
 import GameDetails from './components/GameDetails';
 import GamesList from './components/GamesList';
+import MyGames from './components/MyGames';
 import Footer from './components/Footer';
 
 const toastStyles = {
@@ -61,6 +63,10 @@ function App() {
               <Route path="/" element={<Home />} />
               <Route path="/games" element={<GamesList />} />
               <Route path="/games/:gameId" element={<GameDetails />} />
+              <Route path="/my-games/:category" element={<MyGames />} />
+              <Route path="/my-liked-games" element={<MyGames />} />
+              <Route path="/my-purchased-games" element={<MyGames />} />
+              <Route path="/my-recommended-games" element={<MyGames />} />
             </Routes>
           )}
         </main>

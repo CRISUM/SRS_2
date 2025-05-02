@@ -11,7 +11,7 @@ const GameDetails = () => {
   const [similarGames, setSimilarGames] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  // Load user actions from localStorage
+  // 从localStorage加载用户操作
   const [userActions, setUserActions] = useState(() => {
     const savedActions = localStorage.getItem('userGameActions');
     return savedActions ? JSON.parse(savedActions) : {
@@ -21,7 +21,7 @@ const GameDetails = () => {
     };
   });
 
-  // Check if game is in user's actions
+  // 检查游戏是否在用户操作列表中 - 确保使用数字类型比较
   const isLiked = userActions?.liked?.includes(parseInt(gameId));
   const isPurchased = userActions?.purchased?.includes(parseInt(gameId));
   const isRecommended = userActions?.recommended?.includes(parseInt(gameId));
@@ -31,7 +31,7 @@ const GameDetails = () => {
       setLoading(true);
 
       try {
-        // Fetch game details and similar games in parallel
+        // 并行获取游戏详情和相似游戏
         const [gameResponse, similarGamesResponse] = await Promise.all([
           axios.get(`/api/games/${gameId}`),
           axios.get(`/api/similar-games/${gameId}?count=4`)
@@ -40,13 +40,13 @@ const GameDetails = () => {
         if (gameResponse.data.status === 'success') {
           setGame(gameResponse.data.game);
         } else {
-          toast.error('Failed to load game details');
+          toast.error('加载游戏详情失败');
         }
 
         setSimilarGames(similarGamesResponse.data.similar_games || []);
       } catch (error) {
-        console.error('Error fetching game data:', error);
-        toast.error('Failed to load game data. Please try again later.');
+        console.error('获取游戏数据时出错:', error);
+        toast.error('加载游戏数据失败。请稍后再试。');
       } finally {
         setLoading(false);
       }
@@ -55,18 +55,18 @@ const GameDetails = () => {
     fetchGameData();
   }, [gameId]);
 
-  // Save user actions to localStorage when they change
+  // 用户操作变更时保存到localStorage
   useEffect(() => {
     localStorage.setItem('userGameActions', JSON.stringify(userActions));
   }, [userActions]);
 
   const handleGameAction = (gameId, actionType) => {
     setUserActions(prev => {
-      // Create a copy of the action arrays
+      // 创建操作数组的副本
       const newActions = { ...prev };
       const gameIdNum = parseInt(gameId);
 
-      // Update the appropriate array based on action type
+      // 根据操作类型更新适当的数组
       switch (actionType) {
         case 'like':
           if (!newActions.liked.includes(gameIdNum)) {
@@ -99,17 +99,17 @@ const GameDetails = () => {
       return newActions;
     });
 
-    // Show action notification
+    // 显示操作通知
     const actionMessages = {
-      like: 'Game added to liked games',
-      buy: 'Game added to your library',
-      recommend: 'Game added to recommended games',
-      unlike: 'Game removed from liked games',
-      unbuy: 'Game removed from your library',
-      unrecommend: 'Game removed from recommended games'
+      like: '游戏已添加到喜欢的游戏',
+      buy: '游戏已添加到您的库',
+      recommend: '游戏已添加到推荐游戏',
+      unlike: '游戏已从喜欢的游戏中移除',
+      unbuy: '游戏已从您的库中移除',
+      unrecommend: '游戏已从推荐游戏中移除'
     };
 
-    toast.success(actionMessages[actionType] || 'Action recorded');
+    toast.success(actionMessages[actionType] || '操作已记录');
   };
 
   if (loading) {
@@ -123,16 +123,19 @@ const GameDetails = () => {
   if (!game) {
     return (
       <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4" role="alert">
-        <strong className="font-bold">Error:</strong>
-        <span className="block sm:inline"> Game not found or an error occurred.</span>
+        <strong className="font-bold">错误：</strong>
+        <span className="block sm:inline"> 未找到游戏或发生错误。</span>
         <div className="mt-4">
           <Link to="/games" className="text-blue-600 hover:text-blue-800">
-            &larr; Return to Games
+            &larr; 返回游戏
           </Link>
         </div>
       </div>
     );
   }
+
+  // 处理游戏标签（确保它们是数组格式）
+  const gameTags = typeof game.tags === 'string' ? game.tags.split(',').map(tag => tag.trim()) : (game.tags || []);
 
   return (
     <div className="game-details">
@@ -141,30 +144,49 @@ const GameDetails = () => {
           <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-1" viewBox="0 0 20 20" fill="currentColor">
             <path fillRule="evenodd" d="M9.707 16.707a1 1 0 01-1.414 0l-6-6a1 1 0 010-1.414l6-6a1 1 0 011.414 1.414L5.414 9H17a1 1 0 110 2H5.414l4.293 4.293a1 1 0 010 1.414z" clipRule="evenodd" />
           </svg>
-          Back to Games
+          返回游戏
         </Link>
       </div>
 
-      {/* Game header */}
+      {/* 游戏头部 */}
       <div className="bg-white rounded-lg shadow-md overflow-hidden mb-8">
         <div className="relative h-64 md:h-80 bg-gray-800">
           <img
-            src={`https://cdn.akamai.steamstatic.com/steam/apps/${game.id}/header.jpg`}
+            src={`https://cdn.akamai.steamstatic.com/steam/apps/${game.app_id}/header.jpg`}
             alt={game.title}
             className="w-full h-full object-cover"
             onError={(e) => {
+              // 尝试备用图片
               e.target.onerror = null;
-              e.target.src = `data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1200' height='400' viewBox='0 0 1200 400'%3E%3Crect width='1200' height='400' fill='%23444444'/%3E%3Ctext x='50%25' y='50%25' font-family='Arial' font-size='40' text-anchor='middle' fill='%23cccccc' dominant-baseline='middle'%3E${encodeURIComponent(game.title || "Game Image")}%3C/text%3E%3C/svg%3E`;
+              // 尝试另一个图片格式
+              e.target.src = `https://cdn.akamai.steamstatic.com/steam/apps/${game.app_id}/capsule_616x353.jpg`;
+
+              // 如果还是失败，使用SVG占位符
+              e.target.onerror = () => {
+                e.target.onerror = null;
+                const encodedTitle = encodeURIComponent(game.title || "Game");
+                e.target.src = `data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1200' height='400' viewBox='0 0 1200 400'%3E%3Crect width='1200' height='400' fill='%23444444'/%3E%3Ctext x='50%25' y='50%25' font-family='Arial' font-size='40' text-anchor='middle' fill='%23cccccc' dominant-baseline='middle'%3E${encodedTitle}%3C/text%3E%3C/svg%3E`;
+              };
             }}
           />
 
-          {/* Price tag overlay */}
+          {/* 价格标签覆盖层 */}
           {game.price_final !== undefined && (
             <div className="absolute top-4 right-4 bg-black bg-opacity-75 text-white px-4 py-2 rounded-md font-bold">
-              {game.price_final === 0 ? "Free to Play" : `$${game.price_final.toFixed(2)}`}
+              {game.price_final === 0 ? "免费游玩" : `$${game.price_final.toFixed(2)}`}
               {game.price_original > game.price_final && (
                 <span className="ml-2 text-gray-400 line-through text-sm">${game.price_original.toFixed(2)}</span>
               )}
+            </div>
+          )}
+
+          {/* Steam Deck 兼容性标签 */}
+          {game.steam_deck && (
+            <div className="absolute top-4 left-4 bg-black bg-opacity-75 text-white px-4 py-2 rounded-md font-bold flex items-center">
+              <svg className="h-5 w-5 mr-2" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+                <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"></path>
+              </svg>
+              Steam Deck 兼容
             </div>
           )}
         </div>
@@ -176,13 +198,13 @@ const GameDetails = () => {
 
               {game.date_release && (
                 <p className="text-gray-600 mb-2">
-                  Released: {new Date(game.date_release).toLocaleDateString()}
+                  发布日期: {new Date(game.date_release).toLocaleDateString()}
                 </p>
               )}
 
-              {game.tags && game.tags.length > 0 && (
+              {gameTags.length > 0 && (
                 <div className="flex flex-wrap gap-2 mb-4">
-                  {game.tags.map((tag, index) => (
+                  {gameTags.map((tag, index) => (
                     <span key={index} className="bg-gray-200 text-gray-700 px-2 py-1 rounded text-sm">
                       {tag}
                     </span>
@@ -203,7 +225,7 @@ const GameDetails = () => {
                 <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                   <path fillRule="evenodd" d="M3.172 5.172a4 4 0 015.656 0L10 6.343l1.172-1.171a4 4 0 115.656 5.656L10 17.657l-6.828-6.829a4 4 0 010-5.656z" clipRule="evenodd" />
                 </svg>
-                <span>{isLiked ? 'Liked' : 'Like'}</span>
+                <span>{isLiked ? '已喜欢' : '喜欢'}</span>
               </button>
 
               <button
@@ -217,7 +239,7 @@ const GameDetails = () => {
                 <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                   <path d="M3 1a1 1 0 000 2h1.22l.305 1.222a.997.997 0 00.01.042l1.358 5.43-.893.892C3.74 11.846 4.632 14 6.414 14H15a1 1 0 000-2H6.414l1-1H14a1 1 0 00.894-.553l3-6A1 1 0 0017 3H6.28l-.31-1.243A1 1 0 005 1H3zM16 16.5a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0zM6.5 18a1.5 1.5 0 100-3 1.5 1.5 0 000 3z" />
                 </svg>
-                <span>{isPurchased ? 'In Library' : 'Add to Library'}</span>
+                <span>{isPurchased ? '在库中' : '添加到库'}</span>
               </button>
 
               <button
@@ -231,26 +253,28 @@ const GameDetails = () => {
                 <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                   <path d="M2 10.5a1.5 1.5 0 113 0v6a1.5 1.5 0 01-3 0v-6zM6 10.333v5.43a2 2 0 001.106 1.79l.05.025A4 4 0 008.943 18h5.416a2 2 0 001.962-1.608l1.2-6A2 2 0 0015.56 8H12V4a2 2 0 00-2-2 1 1 0 00-1 1v.667a4 4 0 01-.8 2.4L6.8 7.933a4 4 0 00-.8 2.4z" />
                 </svg>
-                <span>{isRecommended ? 'Recommended' : 'Recommend'}</span>
+                <span>{isRecommended ? '已推荐' : '推荐'}</span>
               </button>
             </div>
           </div>
 
-          {/* Game stats */}
-          {game.positive_ratio !== undefined && (
+          {/* 游戏统计数据 */}
+          {(game.positive_ratio !== undefined || game.rating !== undefined || game.win !== undefined) && (
             <div className="mt-6 p-4 bg-gray-100 rounded-md">
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                 {game.positive_ratio !== undefined && (
                   <div className="text-center">
                     <div className="text-2xl font-bold text-blue-600">{(game.positive_ratio * 100).toFixed(0)}%</div>
-                    <div className="text-sm text-gray-600">Positive Reviews</div>
+                    <div className="text-sm text-gray-600">好评率</div>
                   </div>
                 )}
 
                 {game.rating !== undefined && (
                   <div className="text-center">
-                    <div className="text-2xl font-bold text-blue-600">{game.rating.toFixed(1)}</div>
-                    <div className="text-sm text-gray-600">Rating</div>
+                    <div className="text-2xl font-bold text-blue-600">{
+                      typeof game.rating === 'string' ? game.rating : game.rating.toFixed(1)
+                    }</div>
+                    <div className="text-sm text-gray-600">评分</div>
                   </div>
                 )}
 
@@ -286,24 +310,24 @@ const GameDetails = () => {
             </div>
           )}
 
-          {/* Description */}
+          {/* 描述 */}
           {game.description && (
             <div className="mt-6">
-              <h3 className="text-xl font-semibold mb-3">About This Game</h3>
+              <h3 className="text-xl font-semibold mb-3">关于这款游戏</h3>
               <p className="text-gray-700 leading-relaxed">{game.description}</p>
             </div>
           )}
         </div>
       </div>
 
-      {/* Similar games */}
+      {/* 相似游戏 */}
       {similarGames.length > 0 && (
         <div className="mb-8">
-          <h2 className="text-2xl font-bold mb-4">Similar Games</h2>
+          <h2 className="text-2xl font-bold mb-4">相似游戏</h2>
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
             {similarGames.map(similarGame => (
               <GameCard
-                key={similarGame.id}
+                key={similarGame.app_id}
                 game={similarGame}
                 onAction={handleGameAction}
                 userActions={userActions}

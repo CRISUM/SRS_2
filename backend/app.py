@@ -65,7 +65,7 @@ app.config['JWT_ACCESS_TOKEN_EXPIRES'] = 86400  # 24-hour token expiration
 jwt = JWTManager(app)
 
 # Data file paths
-DATA_DIR = os.environ.get('DATA_DIR', '../data')
+DATA_DIR = os.environ.get('DATA_DIR', '../data/origin')
 GAMES_CSV = os.path.join(DATA_DIR, 'games.csv')
 GAMES_METADATA = os.path.join(DATA_DIR, 'games_metadata.json')
 RECOMMENDATIONS_CSV = os.path.join(DATA_DIR, 'recommendations.csv')
@@ -73,6 +73,18 @@ USERS_CSV = os.path.join(DATA_DIR, 'users.csv')
 
 # Flag to indicate whether to use sample data
 USE_SAMPLE_DATA = os.environ.get('USE_SAMPLE_DATA', 'false').lower() == 'true'
+
+# 打印所有文件路径
+print(f"游戏CSV: {GAMES_CSV}")
+print(f"游戏元数据: {GAMES_METADATA}")
+print(f"推荐CSV: {RECOMMENDATIONS_CSV}")
+print(f"用户CSV: {USERS_CSV}")
+
+# 检查文件是否存在
+print(f"游戏CSV存在: {os.path.exists(GAMES_CSV)}")
+print(f"游戏元数据存在: {os.path.exists(GAMES_METADATA)}")
+print(f"推荐CSV存在: {os.path.exists(RECOMMENDATIONS_CSV)}")
+print(f"用户CSV存在: {os.path.exists(USERS_CSV)}")
 
 # Global data
 games_df = None
@@ -102,112 +114,91 @@ DEFAULT_USER_PREFERENCES = {
 }
 
 def get_game_info(game_id):
-    """Get game information with caching for better performance"""
-    # Try to convert to int for consistent lookup
+    """Get game information with improved error handling for tags and NA values"""
     try:
         game_id = int(game_id)
     except ValueError:
         return None
 
-    # Check cache first
-    if game_id in game_info_cache:
-        return game_info_cache[game_id]
-
-    # Not in cache, need to look up
-    game_info = None
-
-    # Try to find in DataFrame
+    # 尝试在 DataFrame 中查找
     if games_df is not None:
-        # Use boolean indexing to find the game
+        # 使用布尔索引查找游戏
         game_data = games_df[games_df['app_id'] == game_id]
 
         if len(game_data) > 0:
             first_row = game_data.iloc[0]
             game_info = {
-                'id': int(game_id),
+                'app_id': int(game_id),
                 'title': first_row['title'] if 'title' in first_row and pd.notna(
                     first_row['title']) else f"Game {game_id}"
             }
 
-            # Add tags (handle different possible formats safely)
+            # 从 metadata 添加标签
             game_tags = []
-            if 'tags' in game_data.columns:
-                # Get the first row's tags value
-                tags_value = first_row['tags']
-
-                # Check if it's not NA (avoiding the array truth value error)
-                if isinstance(tags_value, list) or (isinstance(tags_value, (str, float, int)) and pd.notna(tags_value)):
-                    # Handle different tag formats
-                    if isinstance(tags_value, list):
-                        game_tags = tags_value
-                    elif isinstance(tags_value, str):
-                        game_tags = [tag.strip() for tag in tags_value.split(',')]
-
-            # If no tags found in DataFrame, try from metadata
-            if not game_tags and game_id in games_metadata and 'tags' in games_metadata[game_id]:
-                metadata_tags = games_metadata[game_id]['tags']
-                if isinstance(metadata_tags, list):
-                    game_tags = metadata_tags
-                elif isinstance(metadata_tags, str):
-                    game_tags = [tag.strip() for tag in metadata_tags.split(',')]
-
-            # Assign the tags to game_info
+            if game_id in games_metadata and 'tags' in games_metadata[game_id]:
+                tags_value = games_metadata[game_id]['tags']
+                if isinstance(tags_value, list):
+                    game_tags = tags_value
+                elif isinstance(tags_value, str):
+                    game_tags = [tag.strip() for tag in tags_value.split(',')]
             game_info['tags'] = game_tags
 
-            # Add description
+            # 添加描述
             if 'description' in game_data.columns and pd.notna(first_row['description']):
                 game_info['description'] = first_row['description']
             elif game_id in games_metadata and 'description' in games_metadata[game_id]:
                 game_info['description'] = games_metadata[game_id]['description']
             else:
-                game_info['description'] = ""  # Default empty description
+                game_info['description'] = ""  # 默认空描述
 
-            # Add other available info from DataFrame - non-boolean columns
-            for col in ['date_release', 'rating', 'positive_ratio', 'price_final', 'price_original']:
+            # 从 DataFrame 添加其他可用信息 - 非布尔列
+            for col in ['date_release', 'rating', 'positive_ratio', 'price_final', 'price_original', 'steam_deck']:
                 if col in game_data.columns and pd.notna(first_row[col]):
                     game_info[col] = first_row[col]
 
-            # Handle boolean columns separately
+            # 单独处理布尔列
             for bool_col in ['win', 'mac', 'linux']:
                 if bool_col in game_data.columns and pd.notna(first_row[bool_col]):
-                    # Convert Python boolean to JSON-compatible boolean
+                    # 将 Python 布尔值转换为 JSON 兼容布尔值
                     bool_value = first_row[bool_col]
-                    # Convert to a proper boolean if it's a string representation
+                    # 如果是字符串表示，则转换为适当的布尔值
                     if isinstance(bool_value, str):
                         bool_value = bool_value.lower() == 'true'
-                    # Now store it as a Python bool which Flask can properly serialize
+                    # 现在将其存储为 Python 布尔值，Flask 可以正确序列化
                     game_info[bool_col] = bool(bool_value)
 
-    # If not found in DataFrame, try metadata
-    if game_info is None and game_id in games_metadata:
+            return game_info
+
+    # 如果在 DataFrame 中未找到，尝试 metadata
+    if game_id in games_metadata:
         metadata = games_metadata[game_id]
         game_info = {
-            'id': int(game_id),
+            'app_id': int(game_id),
             'title': metadata.get('title', f'Game {game_id}'),
             'tags': metadata.get('tags', []),
             'description': metadata.get('description', '')
         }
 
-        # Add other available info - handling non-boolean columns
-        for key in ['date_release', 'rating', 'positive_ratio', 'price_final', 'price_original']:
+        # 添加其他可用信息 - 处理非布尔列
+        for key in ['date_release', 'rating', 'positive_ratio', 'price_final', 'price_original', 'steam_deck']:
             if key in metadata:
                 game_info[key] = metadata[key]
 
-        # Handle boolean columns separately
+        # 单独处理布尔列
         for bool_col in ['win', 'mac', 'linux']:
             if bool_col in metadata:
                 bool_value = metadata[bool_col]
-                # Convert string representations to proper booleans
+                # 将字符串表示转换为适当的布尔值
                 if isinstance(bool_value, str):
                     bool_value = bool_value.lower() == 'true'
-                # Store as a Python bool which Flask can properly serialize
+                # 存储为 Python 布尔值，Flask 可以正确序列化
                 game_info[bool_col] = bool(bool_value)
 
-    # Cache the result (even if None)
-    if game_info is not None:
-        game_info_cache[game_id] = game_info
+        return game_info
 
-    return game_info
+    # 游戏未找到
+    return None
+
 
 def convert_numpy_types(obj):
     """Convert numpy types to native Python types recursively."""
@@ -1006,56 +997,111 @@ def get_game(game_id):
 
 @app.route('/api/games', methods=['GET'])
 def get_games():
-    """Get games list API with improved error handling"""
     try:
-        # Check if we have games data
-        if games_df is None or len(games_df) == 0:
-            logger.warning("No games data available, attempting to reload")
-            if not load_data():
-                return custom_jsonify({'status': 'error', 'message': 'Game data not available'}), 500
-
-        # Pagination parameters
+        # 分页参数
         page = int(request.args.get('page', 1))
         limit = int(request.args.get('limit', 20))
 
-        # Search parameter
+        # 搜索和过滤参数
         search = request.args.get('search', '').lower()
+        tags_param = request.args.get('tags', '')
+        steam_deck = request.args.get('steam_deck', '').lower() == 'true'
 
-        # Filter games
+        if games_df is None:
+            logger.warning("游戏数据不可用，尝试重新加载")
+            if not load_data():
+                # 如果还是失败，尝试加载样例数据
+                if not load_sample_data():
+                    return custom_jsonify({'status': 'error', 'message': '游戏数据不可用', 'games': []}), 500
+
+        # 再次检查数据是否已加载
+        if games_df is None:
+            # 如果仍然为 None，返回空结果
+            return custom_jsonify({
+                'status': 'warning',
+                'message': '游戏数据库为空，返回空列表',
+                'games': [],
+                'pagination': {
+                    'page': 1,
+                    'limit': 20,
+                    'total_games': 0,
+                    'total_pages': 1
+                }
+            })
+
+        # 过滤游戏
         filtered_games = games_df.copy()
+        filtered_app_ids = set(filtered_games['app_id'].tolist())
+
+        # 搜索标题
         if search and 'title' in filtered_games.columns:
-            # Handle potential missing values
             title_column = filtered_games['title'].fillna('')
             filtered_games = filtered_games[title_column.str.lower().str.contains(search, na=False)]
+            filtered_app_ids = set(filtered_games['app_id'].tolist())
 
-        # Calculate total pages
+        # 过滤标签 - 修改后的方法
+        if tags_param:
+            tag_list = [tag.strip() for tag in tags_param.split(',')]
+
+            # 检查是否有tags列
+            if 'tags' in filtered_games.columns:
+                # 使用 DataFrame 中的 tags 列
+                filtered_games = filtered_games[filtered_games['tags'].apply(
+                    lambda x: any(tag in x for tag in tag_list) if isinstance(x, list) or pd.notna(x) else False
+                )]
+                filtered_app_ids = set(filtered_games['app_id'].tolist())
+            else:
+                # 使用 metadata 中的 tags
+                matching_app_ids = set()
+                for app_id in filtered_app_ids:
+                    if app_id in games_metadata and 'tags' in games_metadata[app_id]:
+                        metadata_tags = games_metadata[app_id]['tags']
+                        # 处理不同格式的标签
+                        if isinstance(metadata_tags, list):
+                            if any(tag in metadata_tags for tag in tag_list):
+                                matching_app_ids.add(app_id)
+                        elif isinstance(metadata_tags, str):
+                            metadata_tag_list = [t.strip() for t in metadata_tags.split(',')]
+                            if any(tag in metadata_tag_list for tag in tag_list):
+                                matching_app_ids.add(app_id)
+
+                # 更新过滤的游戏集合
+                filtered_app_ids = filtered_app_ids.intersection(matching_app_ids)
+                filtered_games = filtered_games[filtered_games['app_id'].isin(filtered_app_ids)]
+
+        # 过滤 Steam Deck 兼容性
+        if steam_deck and 'steam_deck' in filtered_games.columns:
+            filtered_games = filtered_games[filtered_games['steam_deck'] == True]
+            filtered_app_ids = set(filtered_games['app_id'].tolist())
+
+        # 计算总页数
         total_games = len(filtered_games)
         total_pages = max(1, (total_games + limit - 1) // limit)
 
-        # Ensure valid page number
+        # 确保页码有效
         page = max(1, min(page, total_pages))
 
-        # Pagination
+        # 分页
         start = (page - 1) * limit
         end = min(start + limit, total_games)
 
-        # Extract current page games
+        # 提取当前页游戏
         if start < end:
             current_page_games = filtered_games.iloc[start:end]
         else:
-            current_page_games = filtered_games.head(0)  # Empty DataFrame with same structure
+            current_page_games = filtered_games.head(0)  # 空 DataFrame
 
-        # Convert to JSON
+        # 转换为 JSON
         games_list = []
         for _, row in current_page_games.iterrows():
             game_id = row['app_id']
 
-            # Get game info using our helper function
+            # 使用 helper 函数获取游戏信息
             game_info = get_game_info(game_id)
             if game_info:
                 games_list.append(game_info)
 
-        # Use convert_numpy_types before jsonify
+        # 使用 convert_numpy_types 处理 JSON 序列化问题
         response_data = convert_numpy_types({
             'status': 'success',
             'games': games_list,
@@ -1068,9 +1114,8 @@ def get_games():
         })
 
         return custom_jsonify(response_data)
-
     except Exception as e:
-        logger.error(f"Error getting games: {str(e)}")
+        logger.error(f"获取游戏时出错: {str(e)}")
         logger.error(traceback.format_exc())
         return custom_jsonify({'status': 'error', 'message': str(e)}), 500
 
