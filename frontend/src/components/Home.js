@@ -281,15 +281,22 @@ const Home = () => {
       {showRecommendations && recommendations.length > 0 && (
         <section className="mb-10">
           <h2 className="text-2xl font-bold mb-4">Your Personalized Recommendations</h2>
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))',
+            gap: '1.5rem',
+            marginBottom: '2rem'
+          }}>
             {recommendations.map(game => (
-              <GameCard
-                key={game.id}
-                game={game}
-                onAction={handleGameAction}
-                userActions={userActions}
-                showScore={true}
-              />
+              <div key={game.id} style={{ height: '100%' }}>
+                <GameCard
+                  key={game.id}
+                  game={game}
+                  onAction={handleGameAction}
+                  userActions={userActions}
+                  showScore={true}
+                />
+              </div>
             ))}
           </div>
         </section>

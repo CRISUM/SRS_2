@@ -222,25 +222,24 @@ const MyGames = () => {
           <h1 className={`text-3xl font-bold ${categoryInfo.color}`}>{categoryInfo.title}</h1>
         </div>
 
-        <Link to="/games" className="text-blue-600 hover:text-blue-800 flex items-center">
-          <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-1" viewBox="0 0 20 20" fill="currentColor">
-            <path fillRule="evenodd" d="M9.707 16.707a1 1 0 01-1.414 0l-6-6a1 1 0 010-1.414l6-6a1 1 0 011.414 1.414L5.414 9H17a1 1 0 110 2H5.414l4.293 4.293a1 1 0 010 1.414z" clipRule="evenodd" />
-          </svg>
-          Back to Games
+        <Link to="/games" className="text-blue-600 hover:text-blue-800 inline-flex items-center text-xs">
+
+          Back to Browse Games
         </Link>
       </div>
 
+
       {/* Category tabs */}
-      <div className="flex border-b border-gray-200 mb-6">
+      <div className="flex border-b border-gray-200 mb-6 overflow-x-auto">
         <button
           onClick={() => setSelectedCategory('liked')}
-          className={`px-4 py-2 text-sm font-medium flex items-center ${
+          className={`px-3 py-1 text-xs font-medium flex items-center ${
             selectedCategory === 'liked'
               ? 'border-b-2 border-red-500 text-red-600'
               : 'text-gray-500 hover:text-gray-700 hover:border-gray-300'
           }`}
         >
-          <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-1" viewBox="0 0 20 20" fill="currentColor">
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3 mr-1" viewBox="0 0 20 20" fill="currentColor">
             <path fillRule="evenodd" d="M3.172 5.172a4 4 0 015.656 0L10 6.343l1.172-1.171a4 4 0 115.656 5.656L10 17.657l-6.828-6.829a4 4 0 010-5.656z" clipRule="evenodd" />
           </svg>
           Liked ({userActions.liked.length})
@@ -248,13 +247,13 @@ const MyGames = () => {
 
         <button
           onClick={() => setSelectedCategory('purchased')}
-          className={`px-4 py-2 text-sm font-medium flex items-center ${
+          className={`px-3 py-1 text-xs font-medium flex items-center ${
             selectedCategory === 'purchased'
               ? 'border-b-2 border-green-500 text-green-600'
               : 'text-gray-500 hover:text-gray-700 hover:border-gray-300'
           }`}
         >
-          <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-1" viewBox="0 0 20 20" fill="currentColor">
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3 mr-1" viewBox="0 0 20 20" fill="currentColor">
             <path d="M3 1a1 1 0 000 2h1.22l.305 1.222a.997.997 0 00.01.042l1.358 5.43-.893.892C3.74 11.846 4.632 14 6.414 14H15a1 1 0 000-2H6.414l1-1H14a1 1 0 00.894-.553l3-6A1 1 0 0017 3H6.28l-.31-1.243A1 1 0 005 1H3zM16 16.5a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0zM6.5 18a1.5 1.5 0 100-3 1.5 1.5 0 000 3z" />
           </svg>
           Library ({userActions.purchased.length})
@@ -262,13 +261,13 @@ const MyGames = () => {
 
         <button
           onClick={() => setSelectedCategory('recommended')}
-          className={`px-4 py-2 text-sm font-medium flex items-center ${
+          className={`px-3 py-1 text-xs font-medium flex items-center ${
             selectedCategory === 'recommended'
               ? 'border-b-2 border-blue-500 text-blue-600'
               : 'text-gray-500 hover:text-gray-700 hover:border-gray-300'
           }`}
         >
-          <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-1" viewBox="0 0 20 20" fill="currentColor">
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3 mr-1" viewBox="0 0 20 20" fill="currentColor">
             <path d="M2 10.5a1.5 1.5 0 113 0v6a1.5 1.5 0 01-3 0v-6zM6 10.333v5.43a2 2 0 001.106 1.79l.05.025A4 4 0 008.943 18h5.416a2 2 0 001.962-1.608l1.2-6A2 2 0 0015.56 8H12V4a2 2 0 00-2-2 1 1 0 00-1 1v.667a4 4 0 01-.8 2.4L6.8 7.933a4 4 0 00-.8 2.4z" />
           </svg>
           Recommended ({userActions.recommended.length})
@@ -311,7 +310,12 @@ const MyGames = () => {
           </Link>
         </div>
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))',
+          gap: '1.5rem',
+          marginBottom: '2rem'
+        }}>
           {filteredGames.map(game => (
             <GameCard
               key={game.id}
