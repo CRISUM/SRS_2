@@ -203,7 +203,7 @@ class ContentBasedModel(BaseRecommenderModel):
 
                 # 计算带评分的热度
                 popular_games = []
-                for game_id, count in game_counts.items()[:100]:  # 只取前100个
+                for game_id, count in list(game_counts.items())[:100]:  # 只取前100个
                     # 计算流行度分数
                     popularity = count / total_users
 
